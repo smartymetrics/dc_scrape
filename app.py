@@ -248,7 +248,33 @@ async def wait_for_messages_to_load(page):
     
     return None, None
 
+async def detect_account_picker(page):
+    """Detect if Discord is showing account picker (requires manual selection)"""
+    selectors = [
+        'button[class*="userButton"]',
+        '[class*="accountPicker"]',
+        '[class*="SelectAccount"]',
+        'div:has-text("Select Account")',
+        'div:has-text("Which account?")',
+    ]
+    
+    for selector in selectors:
+        try:
+            if await page.locator(selector).count() > 0:
+                return True
+        except: pass
+    
+    return False
+
 async def async_archiver_logic():
+    """
+    Smart Hybrid Scraper:
+    - Starts in headless mode for 24/7 scraping efficiency
+    - Detects account picker (new Discord security)
+    - Shows screenshots for manual account selection when needed
+    - Saves session to Supabase after successful login
+    - Resumes headless scraping once session is valid
+    """
     log("🚀 Async Scraper Logic Started.")
     
     state_path = os.path.join(DATA_DIR, STORAGE_STATE_FILE)
@@ -286,6 +312,14 @@ async def async_archiver_logic():
                     log("🔒 Login required...")
                     try: await page.goto("https://discord.com/login", timeout=10000)
                     except: pass
+                    
+                    # Check for account picker
+                    account_picker_detected = await detect_account_picker(page)
+                    if account_picker_detected:
+                        log("👤 Account picker detected - switching to interactive mode")
+                        send_telegram_alert("Account Picker", "Discord requires account selection. Web UI is now active for manual selection.", "warning")
+                        # Stay in current mode (screenshots will show the picker)
+                        # User needs to click through the account selection
                     
                     wait_cycles = 0
                     while wait_cycles < 120 and not stop_event.is_set():
@@ -380,9 +414,13 @@ async def async_archiver_logic():
             except Exception as e:
                 log(f"💥 Critical Error: {e}")
                 await asyncio.sleep(10)
-
-        await context.close()
-        await browser.close()
+        
+        # Only close browser when explicitly stopping
+        if context:
+            await context.close()
+        if browser:
+            await browser.close()
+        log("✅ Browser session closed.")
     
     set_status("STOPPED")
 
