@@ -9,37 +9,13 @@ import queue
 import base64
 import logging
 import requests
+import asyncio # Essential for the fix
 from datetime import datetime, timedelta
 from flask import Flask, render_template_string, jsonify
 from flask_socketio import SocketIO
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+# CHANGED: Import Async API instead of Sync
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 import supabase_utils
-
-# --- Prevent event loop conflicts ---
-os.environ['EVENTLET_NOKQUEUE'] = '1'
-
-# CRITICAL FIX: Prevent asyncio event loop conflicts with Playwright
-import asyncio
-import sys
-
-def disable_asyncio_loop():
-    """Disable asyncio event loop to allow Playwright sync API"""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.close()
-    except RuntimeError:
-        pass
-    
-    # Set a dummy event loop policy that does nothing
-    asyncio.set_event_loop_policy(None)
-    try:
-        asyncio.set_event_loop(None)
-    except:
-        pass
-
-# Call this before any Playwright code
-disable_asyncio_loop()
 
 # --- Configuration ---
 CHANNELS = os.getenv("CHANNELS", "").split(",")
@@ -63,8 +39,8 @@ ALERT_COOLDOWN = 1800
 
 # --- Flask App Setup ---
 app = Flask(__name__)
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR) 
+log_adapter = logging.getLogger('werkzeug')
+log_adapter.setLevel(logging.ERROR) 
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
@@ -83,9 +59,8 @@ thread_lock = threading.Lock()
 
 if not CHANNELS:
     logging.error("ERROR: CHANNELS environment variable not set. Exiting.")
-    exit(1)
 
-# --- HTML Template ---
+# --- HTML Template (unchanged) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -241,11 +216,6 @@ def track_channel_error(channel_url, error_msg):
             f"Consecutive failures: {error_count}\n"
             f"Status: {downtime_str}\n"
             f"Error: {error_msg}\n\n"
-            f"Possible causes:\n"
-            f"• Session expired (needs re-login)\n"
-            f"• Discord detecting automation\n"
-            f"• Channel access revoked\n"
-            f"• Network/server issues"
         )
         send_telegram_alert(f"Channel Access Failed ({error_count}x)", body, alert_type)
 
@@ -253,50 +223,46 @@ def track_channel_success(channel_url):
     archiver_state["error_counts"][channel_url] = 0
     archiver_state["last_success_time"][channel_url] = datetime.utcnow().isoformat()
 
-def wait_for_messages_to_load(page, max_wait=15):
+# --- ASYNC Helper Functions ---
+async def wait_for_messages_to_load(page):
     """
-    Improved message detection with multiple strategies and scrolling
+    Improved message detection - ASYNC version
     """
-    # Multiple possible selectors Discord might use
     SELECTORS = [
-        'li[id^="chat-messages-"]',  # Original selector
-        '[class*="message-"][class*="cozy"]',  # Message container classes
-        '[id^="message-content-"]',  # Message content IDs
-        'div[class*="messageContent-"]',  # Alternative message content
-        '[data-list-item-id^="chat-messages"]',  # Data attributes
+        'li[id^="chat-messages-"]',
+        '[class*="message-"][class*="cozy"]',
+        '[id^="message-content-"]',
+        'div[class*="messageContent-"]',
+        '[data-list-item-id^="chat-messages"]',
     ]
     
     log("   🔍 Waiting for messages to load...")
     start_time = time.time()
     
-    # First, wait for the chat area to be present
     try:
-        page.wait_for_selector('main[class*="chatContent"], div[class*="chat-"]', timeout=5000)
+        await page.wait_for_selector('main[class*="chatContent"], div[class*="chat-"]', timeout=5000)
         log("   ✅ Chat area detected")
     except:
         log("   ⚠️ Chat area not found")
     
-    # Try scrolling to trigger lazy loading
     for scroll_attempt in range(3):
         try:
-            # Scroll up to load older messages
-            page.evaluate("window.scrollTo(0, 0)")
-            time.sleep(0.5)
+            await page.evaluate("window.scrollTo(0, 0)")
+            await asyncio.sleep(0.5)
             
-            # Try each selector
             for selector in SELECTORS:
                 try:
                     elements = page.locator(selector)
-                    count = elements.count()
+                    # In Async API, count() needs await
+                    count = await elements.count()
                     if count > 0:
                         log(f"   ✅ Found {count} messages using selector: {selector}")
                         return selector, elements
                 except:
                     continue
             
-            # If no messages found, scroll down and try again
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            time.sleep(0.5)
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(0.5)
             
         except Exception as e:
             log(f"   ⚠️ Scroll attempt {scroll_attempt + 1} error: {str(e)}")
@@ -305,28 +271,15 @@ def wait_for_messages_to_load(page, max_wait=15):
     log(f"   ❌ No messages found after {elapsed:.1f}s")
     return None, None
 
-# --- Scraper Logic ---
-def run_archiver_logic_async():
-    log("🚀 Thread started.")
-    
-    # CRITICAL: Clear any existing event loop in this thread
-    try:
-        loop = asyncio.get_event_loop()
-        if loop and loop.is_running():
-            loop.close()
-    except:
-        pass
-    
-    # Ensure no event loop exists
-    try:
-        asyncio.set_event_loop(None)
-    except:
-        pass
+# --- Main ASYNC Logic ---
+async def async_archiver_logic():
+    log("🚀 Async Scraper Logic Started.")
     
     state_path = os.path.join(DATA_DIR, STORAGE_STATE_FILE)
     remote_state_path = f"{UPLOAD_FOLDER}/{STORAGE_STATE_FILE}"
     last_ids_path = os.path.join(DATA_DIR, LAST_MESSAGE_ID_FILE)
     
+    # Download state (Synchronous Supabase call is fine here)
     retry_count = 0
     while retry_count < 3:
         try:
@@ -336,7 +289,7 @@ def run_archiver_logic_async():
                 break
         except:
             retry_count += 1
-            if retry_count < 3: time.sleep(2)
+            await asyncio.sleep(2)
 
     last_ids = {}
     if os.path.exists(last_ids_path):
@@ -344,262 +297,226 @@ def run_archiver_logic_async():
             with open(last_ids_path, 'r') as f: last_ids = json.load(f)
         except: pass
 
-    browser = None
-    context = None
-    page = None
-    
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=HEADLESS_MODE, 
-                args=['--disable-blink-features=AutomationControlled']
-            )
-            context_args = {
-                "viewport": {'width': 1280, 'height': 800},
-                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-            }
-            if os.path.exists(state_path): context_args["storage_state"] = state_path
-            
-            context = browser.new_context(**context_args)
-            page = context.new_page()
-            set_status("RUNNING")
-
-            while not stop_event.is_set():
-                try:
-                    current_url = page.url
-                    
-                    # Check if login is needed
-                    if "login" in current_url.lower() or current_url == "about:blank" or "discord.com/channels" not in current_url:
-                        log("🔒 Login required. Navigating to login page...")
-                        send_telegram_alert(
-                            "Login Required", 
-                            "Discord session expired. Please log in via the web interface.\n\nThe scraper will wait for 10 minutes for you to log in.",
-                            "login_required"
-                        )
-                        
-                        try:
-                            page.goto("https://discord.com/login", timeout=30000)
-                        except:
-                            pass
-                        
-                        success = False
-                        wait_cycles = 0
-                        max_wait_cycles = 120
-                        
-                        while wait_cycles < max_wait_cycles and not stop_event.is_set():
-                            try:
-                                scr = page.screenshot(quality=40, type='jpeg')
-                                socketio.emit('screenshot', base64.b64encode(scr).decode('utf-8'))
-                            except: pass
-                            
-                            try:
-                                while not input_queue.empty():
-                                    action = input_queue.get_nowait()
-                                    if action['type'] == 'click':
-                                        vp = page.viewport_size
-                                        page.mouse.click(action['x'] * vp['width'], action['y'] * vp['height'])
-                            except: pass
-                            
-                            if "discord.com/channels" in page.url and "/login" not in page.url:
-                                success = True
-                                break
-                            
-                            time.sleep(5)
-                            wait_cycles += 1
-                            
-                            if wait_cycles % 12 == 0:
-                                log(f"⏳ Waiting for login... ({wait_cycles * 5}s elapsed)")
-
-                        if success:
-                            context.storage_state(path=state_path)
-                            supabase_utils.upload_file(state_path, SUPABASE_BUCKET, remote_state_path, debug=False)
-                            log("✅ Login saved successfully!")
-                            send_telegram_alert(
-                                "Login Successful",
-                                "Successfully logged in to Discord. Scraping will now resume.",
-                                "login_success"
-                            )
-                        else:
-                            log("❌ Login timeout - will retry in 5 minutes")
-                            send_telegram_alert(
-                                "Login Timeout",
-                                "No login detected after 10 minutes. Will retry in 5 minutes.\n\nPlease ensure you can access the web interface.",
-                                "login_timeout"
-                            )
-                            time.sleep(300)
-                            continue 
-                    
-                    # Scrape channels
-                    for channel_url in CHANNELS:
-                        if stop_event.is_set(): break
-                        log(f"📂 Visiting {channel_url}...")
-                        
-                        try:
-                            page.goto(channel_url, timeout=30000)
-                            time.sleep(3)  # Give page more time to load
-                            
-                            current_url = page.url
-                            page_title = page.title()
-                            
-                            # Take diagnostic screenshot
-                            try:
-                                scr = page.screenshot(quality=40, type='jpeg')
-                                socketio.emit('screenshot', base64.b64encode(scr).decode('utf-8'))
-                            except: pass
-                            
-                            # Check for failure conditions
-                            if "login" in current_url.lower():
-                                raise Exception("Redirected to login - session expired")
-                            
-                            if "verify" in current_url.lower() or "captcha" in page.content().lower():
-                                raise Exception("Discord verification/captcha required")
-                            
-                            # Use improved message detection
-                            selector, messages = wait_for_messages_to_load(page)
-                            
-                            if not selector or not messages:
-                                raise Exception("No messages found - possible access issue or DOM changed")
-                            
-                        except PlaywrightTimeout as e:
-                            error_msg = (
-                                f"Timeout loading channel\n"
-                                f"Current URL: {page.url}\n"
-                                f"Page Title: {page.title()}\n"
-                            )
-                            log(f"⚠️ Failed to load {channel_url} - Timeout")
-                            log(f"   Debug: URL={page.url}, Title={page.title()}")
-                            track_channel_error(channel_url, error_msg)
-                            continue
-                        except Exception as e:
-                            error_msg = f"{str(e)}\nURL: {page.url if page else 'unknown'}"
-                            log(f"⚠️ Failed to load {channel_url} - {str(e)}")
-                            track_channel_error(channel_url, error_msg)
-                            continue
-
-                        # Parse messages
-                        count = messages.count()
-                        log(f"   📊 Found {count} messages")
-                        
-                        if count == 0:
-                            log(f"⚠️ No messages found in {channel_url}")
-                            track_channel_error(channel_url, "No messages visible")
-                            continue
-                        
-                        batch = []
-                        current_ids = last_ids.get(channel_url, [])
-                        
-                        for i in range(max(0, count - 10), count):
-                            try:
-                                msg = messages.nth(i)
-                                
-                                # Try to get message ID from various possible attributes
-                                raw_id = None
-                                for id_attr in ['id', 'data-list-item-id', 'data-message-id']:
-                                    raw_id = msg.get_attribute(id_attr)
-                                    if raw_id: break
-                                
-                                if not raw_id: continue
-                                
-                                # Extract numeric ID
-                                msg_id = raw_id.replace('chat-messages-', '').replace('message-', '')
-                                if msg_id in current_ids: continue
-                                
-                                # Get message content
-                                content = ""
-                                for content_sel in ['[id^="message-content-"]', '[class*="messageContent-"]']:
-                                    try:
-                                        c_loc = msg.locator(content_sel).first
-                                        if c_loc.count(): 
-                                            content = c_loc.inner_text()
-                                            break
-                                    except: pass
-                                
-                                # Get author
-                                author = "Unknown"
-                                for author_sel in ['h3', '[class*="username-"]', '[class*="author-"]']:
-                                    try:
-                                        h_loc = msg.locator(author_sel).first
-                                        if h_loc.count(): 
-                                            author = h_loc.inner_text().split('\n')[0]
-                                            break
-                                    except: pass
-
-                                # Get media
-                                media = {"images": []}
-                                imgs = msg.locator('img[class*="original"], a[href*="cdn.discordapp.com"] img')
-                                for k in range(imgs.count()):
-                                    src = imgs.nth(k).get_attribute('src')
-                                    if src: media["images"].append({"url": src})
-
-                                # Get timestamp
-                                ts = datetime.utcnow().isoformat()
-                                t_loc = msg.locator('time')
-                                if t_loc.count(): ts = t_loc.first.get_attribute('datetime') or ts
-
-                                batch.append({
-                                    "id": int(msg_id) if msg_id.isdigit() else hash(msg_id),
-                                    "channel_id": int(channel_url.split('/')[-1]),
-                                    "content": clean_text(content),
-                                    "scraped_at": datetime.utcnow().isoformat(),
-                                    "raw_data": {
-                                        "author": clean_text(author),
-                                        "timestamp": ts,
-                                        "media": media,
-                                        "channel_url": channel_url
-                                    }
-                                })
-                                current_ids.append(msg_id)
-                            except Exception as e:
-                                log(f"   ⚠️ Error parsing message: {str(e)}")
-                        
-                        if batch:
-                            log(f"   ⬆️ Uploading {len(batch)} msgs...")
-                            try:
-                                supabase_utils.insert_discord_messages(batch)
-                                track_channel_success(channel_url)
-                            except Exception as e:
-                                log(f"   ❌ Upload failed: {str(e)}")
-                                send_telegram_alert(
-                                    "Database Upload Failed",
-                                    f"Failed to upload {len(batch)} messages\nError: {str(e)}",
-                                    "upload_error"
-                                )
-                            
-                            if len(current_ids) > 200: current_ids = current_ids[-200:]
-                            last_ids[channel_url] = current_ids
-                            with open(last_ids_path, 'w') as f: json.dump(last_ids, f)
-                        else:
-                            track_channel_success(channel_url)
-
-                        time.sleep(2)
-
-                    log("💤 Cycle done. Sleeping 30s...")
-                    for _ in range(30):
-                        if stop_event.is_set(): break
-                        time.sleep(1)
-                    
-                except Exception as e:
-                    log(f"💥 Critical Loop Error: {e}")
-                    send_telegram_alert(
-                        "Critical Error in Scrape Loop",
-                        f"Error: {str(e)}\n\nThe scraper will retry in 10 seconds.",
-                        "loop_error"
-                    )
-                    time.sleep(10)
-            
-            if context: context.close()
-            if browser: browser.close()
-    
-    except Exception as e:
-        log(f"❌ Fatal Error: {e}")
-        send_telegram_alert(
-            "Scraper Crashed",
-            f"Fatal error occurred:\n{str(e)}\n\nScraper has stopped. Please restart manually.",
-            "fatal_error"
+    # Start Async Playwright
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=HEADLESS_MODE, 
+            args=['--disable-blink-features=AutomationControlled']
         )
-    
+        context_args = {
+            "viewport": {'width': 1280, 'height': 800},
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+        }
+        if os.path.exists(state_path): context_args["storage_state"] = state_path
+        
+        context = await browser.new_context(**context_args)
+        page = await context.new_page()
+        set_status("RUNNING")
+
+        while not stop_event.is_set():
+            try:
+                current_url = page.url
+                
+                # --- Login Check ---
+                if "login" in current_url.lower() or current_url == "about:blank" or "discord.com/channels" not in current_url:
+                    log("🔒 Login required. Navigating...")
+                    send_telegram_alert("Login Required", "Please log in via the web interface.", "login_required")
+                    
+                    try:
+                        await page.goto("https://discord.com/login", timeout=30000)
+                    except: pass
+                    
+                    success = False
+                    wait_cycles = 0
+                    
+                    while wait_cycles < 120 and not stop_event.is_set():
+                        # Take screenshot
+                        try:
+                            scr = await page.screenshot(quality=40, type='jpeg')
+                            socketio.emit('screenshot', base64.b64encode(scr).decode('utf-8'))
+                        except: pass
+                        
+                        # Handle clicks
+                        try:
+                            while not input_queue.empty():
+                                action = input_queue.get_nowait()
+                                if action['type'] == 'click':
+                                    vp = page.viewport_size
+                                    await page.mouse.click(action['x'] * vp['width'], action['y'] * vp['height'])
+                        except: pass
+                        
+                        if "discord.com/channels" in page.url and "/login" not in page.url:
+                            success = True
+                            break
+                        
+                        await asyncio.sleep(5)
+                        wait_cycles += 1
+                        if wait_cycles % 12 == 0: log(f"⏳ Waiting for login... ({wait_cycles * 5}s elapsed)")
+
+                    if success:
+                        await context.storage_state(path=state_path)
+                        supabase_utils.upload_file(state_path, SUPABASE_BUCKET, remote_state_path, debug=False)
+                        log("✅ Login saved successfully!")
+                        send_telegram_alert("Login Successful", "Scraping resumed.", "login_success")
+                    else:
+                        log("❌ Login timeout - retrying in 5 mins")
+                        await asyncio.sleep(300)
+                        continue 
+                
+                # --- Scrape Channels ---
+                for channel_url in CHANNELS:
+                    if stop_event.is_set(): break
+                    log(f"📂 Visiting {channel_url}...")
+                    
+                    try:
+                        await page.goto(channel_url, timeout=30000)
+                        await asyncio.sleep(3)
+                        
+                        current_url = page.url
+                        
+                        # Screenshot
+                        try:
+                            scr = await page.screenshot(quality=40, type='jpeg')
+                            socketio.emit('screenshot', base64.b64encode(scr).decode('utf-8'))
+                        except: pass
+                        
+                        if "login" in current_url.lower(): raise Exception("Redirected to login")
+                        
+                        selector, messages = await wait_for_messages_to_load(page)
+                        
+                        if not selector or not messages:
+                            raise Exception("No messages found")
+                        
+                    except Exception as e:
+                        log(f"⚠️ Failed to load {channel_url} - {str(e)}")
+                        track_channel_error(channel_url, str(e))
+                        continue
+
+                    # Parse messages
+                    count = await messages.count()
+                    log(f"   📊 Found {count} messages")
+                    
+                    if count == 0:
+                        track_channel_error(channel_url, "No messages visible")
+                        continue
+                    
+                    batch = []
+                    current_ids = last_ids.get(channel_url, [])
+                    
+                    for i in range(max(0, count - 10), count):
+                        try:
+                            msg = messages.nth(i)
+                            
+                            # ID extraction (await calls)
+                            raw_id = None
+                            for id_attr in ['id', 'data-list-item-id', 'data-message-id']:
+                                raw_id = await msg.get_attribute(id_attr)
+                                if raw_id: break
+                            
+                            if not raw_id: continue
+                            
+                            msg_id = raw_id.replace('chat-messages-', '').replace('message-', '')
+                            if msg_id in current_ids: continue
+                            
+                            # Content extraction
+                            content = ""
+                            for content_sel in ['[id^="message-content-"]', '[class*="messageContent-"]']:
+                                try:
+                                    c_loc = msg.locator(content_sel).first
+                                    if await c_loc.count(): 
+                                        content = await c_loc.inner_text()
+                                        break
+                                except: pass
+                            
+                            # Author extraction
+                            author = "Unknown"
+                            for author_sel in ['h3', '[class*="username-"]', '[class*="author-"]']:
+                                try:
+                                    h_loc = msg.locator(author_sel).first
+                                    if await h_loc.count(): 
+                                        txt = await h_loc.inner_text()
+                                        author = txt.split('\n')[0]
+                                        break
+                                except: pass
+
+                            # Media extraction
+                            media = {"images": []}
+                            imgs = msg.locator('img[class*="original"], a[href*="cdn.discordapp.com"] img')
+                            img_count = await imgs.count()
+                            for k in range(img_count):
+                                src = await imgs.nth(k).get_attribute('src')
+                                if src: media["images"].append({"url": src})
+
+                            # Timestamp
+                            ts = datetime.utcnow().isoformat()
+                            t_loc = msg.locator('time')
+                            if await t_loc.count(): 
+                                val = await t_loc.first.get_attribute('datetime')
+                                if val: ts = val
+
+                            batch.append({
+                                "id": int(msg_id) if msg_id.isdigit() else hash(msg_id),
+                                "channel_id": int(channel_url.split('/')[-1]),
+                                "content": clean_text(content),
+                                "scraped_at": datetime.utcnow().isoformat(),
+                                "raw_data": {
+                                    "author": clean_text(author),
+                                    "timestamp": ts,
+                                    "media": media,
+                                    "channel_url": channel_url
+                                }
+                            })
+                            current_ids.append(msg_id)
+                        except Exception as e:
+                            log(f"   ⚠️ Error parsing message: {str(e)}")
+                    
+                    if batch:
+                        log(f"   ⬆️ Uploading {len(batch)} msgs...")
+                        try:
+                            # Synchronous DB insert is fine here
+                            supabase_utils.insert_discord_messages(batch)
+                            track_channel_success(channel_url)
+                        except Exception as e:
+                            log(f"   ❌ Upload failed: {str(e)}")
+                            send_telegram_alert("Upload Failed", str(e), "upload_error")
+                        
+                        if len(current_ids) > 200: current_ids = current_ids[-200:]
+                        last_ids[channel_url] = current_ids
+                        with open(last_ids_path, 'w') as f: json.dump(last_ids, f)
+                    else:
+                        track_channel_success(channel_url)
+
+                    await asyncio.sleep(2)
+
+                log("💤 Cycle done. Sleeping 30s...")
+                for _ in range(30):
+                    if stop_event.is_set(): break
+                    await asyncio.sleep(1)
+                
+            except Exception as e:
+                log(f"💥 Critical Loop Error: {e}")
+                await asyncio.sleep(10)
+        
+        await context.close()
+        await browser.close()
+
     set_status("STOPPED")
 
+def run_archiver_thread_wrapper():
+    """
+    Wrapper to run async logic inside a standard thread.
+    Creates a fresh event loop for this thread.
+    """
+    try:
+        # Create a new event loop for this specific thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(async_archiver_logic())
+        loop.close()
+    except Exception as e:
+        log(f"FATAL THREAD ERROR: {str(e)}")
+
+# --- Routes ---
 @app.route('/')
 def index(): return render_template_string(HTML_TEMPLATE)
 
@@ -610,7 +527,8 @@ def start_worker():
         if archiver_thread and archiver_thread.is_alive():
             return jsonify({"status": "already_running"}), 409
         stop_event.clear()
-        archiver_thread = threading.Thread(target=run_archiver_logic_async, daemon=True)
+        # Target the wrapper which sets up the async loop
+        archiver_thread = threading.Thread(target=run_archiver_thread_wrapper, daemon=True)
         archiver_thread.start()
     return jsonify({"status": "started"})
 
