@@ -1,25 +1,28 @@
 """
 WSGI entry point for production (Gunicorn)
-Starts both Flask/SocketIO and Telegram bot
+Starts both Flask/SocketIO and Telegram bot in isolated threads
 """
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Import after .env is loaded
-from app import app, socketio, telegram_bot, run_archiver_logic, stop_event
+from app import app, socketio, telegram_bot, run_archiver_logic_async, stop_event
+
+# Thread pool for running blocking Playwright code outside the event loop
+executor = ThreadPoolExecutor(max_workers=1)
 
 # Start Telegram Bot in background thread
 if os.getenv("TELEGRAM_TOKEN"):
     t_bot = threading.Thread(target=telegram_bot.run_bot, daemon=True)
     t_bot.start()
 
-# Start archiver in background thread (auto-start on production)
+# Start archiver in isolated thread (outside event loop)
 def start_archiver():
-    t_archiver = threading.Thread(target=run_archiver_logic, daemon=True)
-    t_archiver.start()
+    executor.submit(run_archiver_logic_async)
 
 # Start archiver immediately on startup
 start_archiver()

@@ -9,6 +9,7 @@ import queue
 import base64
 import logging
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, render_template_string, jsonify
 from flask_socketio import SocketIO
 from playwright.sync_api import sync_playwright
@@ -180,12 +181,10 @@ def clean_text(text):
     text = str(text).replace('\x00', '')
     return ' '.join(text.split()).encode('ascii', 'ignore').decode('ascii')
 
-# --- Scraper Logic ---
-def run_archiver_logic():
+# --- Scraper Logic (runs in thread pool outside event loop) ---
+def run_archiver_logic_async():
+    """Sync Playwright code wrapped for thread pool execution"""
     log("🚀 Thread started.")
-    
-    # Small delay to ensure thread is detached from event loop
-    time.sleep(0.5)
     
     # Paths
     state_path = os.path.join(DATA_DIR, STORAGE_STATE_FILE)
