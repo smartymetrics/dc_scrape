@@ -1,6 +1,5 @@
 flask
 flask-socketio
-playwright
 pytest-playwright
 requests
 supabase
@@ -8,3 +7,5 @@ python-dotenv
 eventlet
 python-telegram-bot[job-queue]
 gunicorn
+nest_asyncio==1.5.8
+playwright==1.40.0
