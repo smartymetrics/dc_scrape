@@ -1,7 +1,6 @@
 import os
 import json
 import logging
-import asyncio
 import threading
 import traceback
 import requests
@@ -23,14 +22,8 @@ USERS_FILE = "bot_users.json"
 CODES_FILE = "active_codes.json"
 POLL_INTERVAL = 30
 
-# Setup logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-# CRITICAL FIX: Silence httpx logger to prevent Token leak in logs
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
-
 logger = logging.getLogger(__name__)
 
 # --- Subscription Manager ---
@@ -43,38 +36,26 @@ class SubscriptionManager:
         self.remote_codes_path = f"discord_josh/{CODES_FILE}"
         self.local_users_path = f"data/{USERS_FILE}"
         self.local_codes_path = f"data/{CODES_FILE}"
-        
-        # Ensure data dir exists
         os.makedirs("data", exist_ok=True)
         self._load_state()
 
     def _load_state(self):
         try:
             data = supabase_utils.download_file(self.local_users_path, self.remote_users_path, SUPABASE_BUCKET)
-            if data:
-                self.users = json.loads(data)
-                logger.info(f"Loaded {len(self.users)} subscribers.")
-        except Exception as e:
-            logger.warning(f"Failed to load users: {e}")
-
-        try:
+            if data: self.users = json.loads(data)
+            
             data = supabase_utils.download_file(self.local_codes_path, self.remote_codes_path, SUPABASE_BUCKET)
-            if data:
-                self.codes = json.loads(data)
-        except Exception as e:
-            logger.warning(f"Failed to load codes: {e}")
+            if data: self.codes = json.loads(data)
+        except Exception as e: logger.warning(f"Failed to load state: {e}")
 
     def _sync_state(self):
         try:
-            with open(self.local_users_path, 'w') as f:
-                json.dump(self.users, f)
+            with open(self.local_users_path, 'w') as f: json.dump(self.users, f)
             supabase_utils.upload_file(self.local_users_path, SUPABASE_BUCKET, self.remote_users_path, debug=False)
             
-            with open(self.local_codes_path, 'w') as f:
-                json.dump(self.codes, f)
+            with open(self.local_codes_path, 'w') as f: json.dump(self.codes, f)
             supabase_utils.upload_file(self.local_codes_path, SUPABASE_BUCKET, self.remote_codes_path, debug=False)
-        except Exception as e:
-            logger.error(f"Failed to sync state: {e}")
+        except Exception: pass
 
     def generate_code(self, days: int) -> str:
         import secrets
@@ -86,23 +67,17 @@ class SubscriptionManager:
 
     def redeem_code(self, user_id: str, username: str, code: str) -> bool:
         with self.lock:
-            if code not in self.codes:
-                return False
-            
+            if code not in self.codes: return False
             days = self.codes.pop(code)
-            current_expiry = datetime.utcnow()
-            
+            current = datetime.utcnow()
             if str(user_id) in self.users:
                 try:
-                    old_expiry = datetime.fromisoformat(self.users[str(user_id)]["expiry"])
-                    if old_expiry > datetime.utcnow():
-                        current_expiry = old_expiry
+                    old_exp = datetime.fromisoformat(self.users[str(user_id)]["expiry"])
+                    if old_exp > current: current = old_exp
                 except: pass
             
-            new_expiry = current_expiry + timedelta(days=days)
-            
             self.users[str(user_id)] = {
-                "expiry": new_expiry.isoformat(),
+                "expiry": (current + timedelta(days=days)).isoformat(),
                 "username": username or "Unknown"
             }
             self._sync_state()
@@ -114,16 +89,9 @@ class SubscriptionManager:
         with self.lock:
             for uid, data in self.users.items():
                 try:
-                    expiry = datetime.fromisoformat(data["expiry"])
-                    if expiry > now:
-                        active.append(uid)
+                    if datetime.fromisoformat(data["expiry"]) > now: active.append(uid)
                 except: pass
         return active
-
-    def get_expiry(self, user_id: str) -> Optional[str]:
-        if str(user_id) in self.users:
-            return self.users[str(user_id)]["expiry"]
-        return None
 
 # --- Message Poller ---
 class MessagePoller:
@@ -138,193 +106,82 @@ class MessagePoller:
     def _init_cursor(self):
         try:
             data = supabase_utils.download_file(self.local_cursor_path, self.remote_cursor_path, SUPABASE_BUCKET)
-            if data:
-                data_json = json.loads(data)
-                self.last_scraped_at = data_json.get("last_scraped_at")
-                logger.info(f"Loaded cursor: {self.last_scraped_at}")
-            
-            if not self.last_scraped_at:
-                # Default to 24 hours ago if no cursor exists
-                self.last_scraped_at = (datetime.utcnow() - timedelta(hours=24)).isoformat()
-                
-        except Exception as e:
-            logger.error(f"Failed to init cursor: {e}")
-            self.last_scraped_at = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+            if data: self.last_scraped_at = json.loads(data).get("last_scraped_at")
+            if not self.last_scraped_at: self.last_scraped_at = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+        except: self.last_scraped_at = (datetime.utcnow() - timedelta(hours=24)).isoformat()
 
     def _save_cursor(self):
         try:
-            with open(self.local_cursor_path, 'w') as f:
-                json.dump({"last_scraped_at": self.last_scraped_at}, f)
+            with open(self.local_cursor_path, 'w') as f: json.dump({"last_scraped_at": self.last_scraped_at}, f)
             supabase_utils.upload_file(self.local_cursor_path, SUPABASE_BUCKET, self.remote_cursor_path, debug=False)
-        except Exception as e:
-            logger.error(f"Failed to save cursor: {e}")
+        except: pass
 
     def poll_new_messages(self):
         try:
-            # Ensure valid timestamp
-            if not self.last_scraped_at:
-                self.last_scraped_at = (datetime.utcnow() - timedelta(minutes=5)).isoformat()
-
-            headers = {
-                "apikey": self.supabase_key,
-                "Authorization": f"Bearer {self.supabase_key}"
-            }
-            
-            # Using Supabase REST API
+            if not self.last_scraped_at: self.last_scraped_at = (datetime.utcnow() - timedelta(minutes=5)).isoformat()
+            headers = {"apikey": self.supabase_key, "Authorization": f"Bearer {self.supabase_key}"}
             url = f"{self.supabase_url}/rest/v1/discord_messages"
-            params = {
-                "scraped_at": f"gt.{self.last_scraped_at}",
-                "order": "scraped_at.asc"
-            }
+            params = {"scraped_at": f"gt.{self.last_scraped_at}", "order": "scraped_at.asc"}
             
             res = requests.get(url, headers=headers, params=params, timeout=10)
+            if res.status_code != 200: return []
             
-            if res.status_code != 200:
-                logger.error(f"Supabase returned status {res.status_code}: {res.text}")
-                return []
-
             messages = res.json()
-            
-            # Handle case where result isn't a list (shouldn't happen on select, but safe to check)
-            if not isinstance(messages, list):
-                logger.error(f"Unexpected response format: {messages}")
-                return []
+            if isinstance(messages, list) and messages:
+                self.last_scraped_at = messages[-1]['scraped_at']
+                self._save_cursor()
+            return messages if isinstance(messages, list) else []
+        except: return []
 
-            if messages:
-                # Update cursor to the very last message's time
-                new_last = messages[-1].get('scraped_at')
-                if new_last:
-                    self.last_scraped_at = new_last
-                    self._save_cursor()
-                
-            return messages
-        except Exception as e:
-            logger.error(f"Polling error: {e}")
-            # Print traceback to debug that '-1' error or similar obscure issues
-            traceback.print_exc()
-            return []
-
-# --- Bot Logic ---
 sm = SubscriptionManager()
 poller = MessagePoller()
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Discord Alert Bot Active.\n/redeem <CODE> to subscribe.")
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- Bot Handlers ---
+async def start(update: Update, context): await update.message.reply_text("👋 Bot Active.\n/redeem <CODE>")
+async def status(update: Update, context):
     uid = str(update.effective_user.id)
-    expiry = sm.get_expiry(uid)
-    if expiry:
-        await update.message.reply_text(f"✅ Active until: {expiry}")
-    else:
-        await update.message.reply_text("❌ Not subscribed.")
+    if uid in sm.users: await update.message.reply_text(f"✅ Active until: {sm.users[uid]['expiry']}")
+    else: await update.message.reply_text("❌ Not subscribed.")
 
-async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: /redeem <CODE>")
-        return
-    
-    code = args[0].strip().upper()
-    uid = str(update.effective_user.id)
-    username = update.effective_user.username
-    
-    if sm.redeem_code(uid, username, code):
-        expiry = sm.users[uid]["expiry"]
-        await update.message.reply_text(f"🎉 Subscribed until {expiry}")
-    else:
-        await update.message.reply_text("❌ Invalid code.")
+async def redeem(update: Update, context):
+    if not context.args: return await update.message.reply_text("Usage: /redeem <CODE>")
+    if sm.redeem_code(str(update.effective_user.id), update.effective_user.username, context.args[0].strip().upper()):
+        await update.message.reply_text("🎉 Code redeemed!")
+    else: await update.message.reply_text("❌ Invalid code.")
 
-async def gen_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    # Check if string ID matches
-    if uid != str(ADMIN_USER_ID): 
-        return
-
-    args = context.args
+async def gen_code(update: Update, context):
+    if str(update.effective_user.id) != str(ADMIN_USER_ID): return
     try:
-        days = int(args[0])
-        code = sm.generate_code(days)
-        await update.message.reply_text(f"🔑 Code: `{code}` ({days} days)")
-    except:
-        await update.message.reply_text("Usage: /gen <days>")
+        code = sm.generate_code(int(context.args[0]))
+        await update.message.reply_text(f"🔑 `{code}`", parse_mode=ParseMode.MARKDOWN)
+    except: await update.message.reply_text("Usage: /gen <days>")
 
-# Background job (Async)
-async def broadcast_job(context: ContextTypes.DEFAULT_TYPE):
-    try:
-        new_msgs = poller.poll_new_messages()
-        if not new_msgs:
-            return
+async def broadcast_job(context):
+    msgs = poller.poll_new_messages()
+    users = sm.get_active_users()
+    if not msgs or not users: return
 
-        active_users = sm.get_active_users()
-        if not active_users:
-            return
-
-        for msg in new_msgs:
-            raw_data = msg.get("raw_data", {}) or {}
-            content = msg.get("content", "")
-            author = raw_data.get("author", "Unknown")
-            channel = raw_data.get("channel_url", "").split('/')[-1] # simple ID
-            
-            # Construct text
-            text = f"📢 <b>{author}</b> in #{channel}\n\n{content}"
-            if len(text) > 4000: text = text[:4000] + "..."
-
-            media_list = raw_data.get("media", {})
-            images = media_list.get("images", [])
-
-            for uid in active_users:
-                try:
-                    await context.bot.send_message(
-                        chat_id=uid, 
-                        text=text, 
-                        parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=True,
-                        connect_timeout=5,
-                        read_timeout=10
-                    )
-                    # Send first image if available
-                    if images and "url" in images[0]:
-                        try:
-                            await context.bot.send_photo(
-                                chat_id=uid,
-                                photo=images[0]["url"],
-                                connect_timeout=5,
-                                read_timeout=10
-                            )
-                        except Exception as e:
-                            logger.warning(f"Failed to send photo to {uid}: {e}")
-                except Exception as e:
-                    logger.error(f"Failed send to {uid}: {e}")
-
-    except Exception as e:
-        logger.error(f"Broadcast Job Error: {e}")
-        traceback.print_exc()
+    for msg in msgs:
+        rd = msg.get("raw_data", {})
+        text = f"📢 <b>{rd.get('author','?')}</b> in #{str(rd.get('channel_url','')).split('/')[-1]}\n\n{msg.get('content','')}"[:4000]
+        img = rd.get("media", {}).get("images", [{}])[0].get("url")
+        
+        for uid in users:
+            try:
+                await context.bot.send_message(uid, text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+                if img: await context.bot.send_photo(uid, img)
+            except: pass
 
 def run_bot():
-    """Entry point used by app.py thread"""
-    if not TELEGRAM_TOKEN:
-        logger.error("No TELEGRAM_TOKEN. Bot disabled.")
-        return
-
+    if not TELEGRAM_TOKEN: return
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("redeem", redeem))
     app.add_handler(CommandHandler("gen", gen_code))
-
-    # Add job queue
-    if app.job_queue:
-        app.job_queue.run_repeating(broadcast_job, interval=POLL_INTERVAL, first=10)
-    
-    logger.info("🤖 Bot started (Polling mode)")
-    try:
-        app.run_polling(allowed_updates=Update.ALL_TYPES)
-    except Exception as e:
-        logger.error(f"Bot error: {e}")
-    finally:
-        logger.info("🤖 Bot shutdown gracefully")
+    if app.job_queue: app.job_queue.run_repeating(broadcast_job, interval=POLL_INTERVAL, first=10)
+    logger.info("🤖 Bot started.")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     run_bot()
