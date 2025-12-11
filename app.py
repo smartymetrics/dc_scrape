@@ -413,7 +413,7 @@ def start_worker():
             return jsonify({"status": "already_running"}), 409
         
         stop_event.clear()
-        archiver_thread = threading.Thread(target=run_archiver_logic, daemon=True)
+        archiver_thread = threading.Thread(target=run_archiver_logic_async, daemon=True)
         archiver_thread.start()
     return jsonify({"status": "started"})
 
