@@ -6,3 +6,4 @@ venv/
 .env
 data/
 storage_state.json
+discord/
