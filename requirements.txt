@@ -1,0 +1,9 @@
+flask
+flask-socketio
+playwright
+pytest-playwright
+requests
+supabase
+python-dotenv
+eventlet
+python-telegram-bot[job-queue]

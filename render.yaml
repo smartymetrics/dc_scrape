@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: discord-archiver
+    env: docker
+    plan: free
+    region: oregon
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: EMAIL_USER
+        sync: false
+      - key: EMAIL_PASSWORD
+        sync: false
+      - key: CHANNELS
+        sync: false
