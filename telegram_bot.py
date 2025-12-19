@@ -337,14 +337,17 @@ class MessagePoller:
                     new_messages.append(msg)
                     self.sent_hashes.add(content_hash)
             
-            if messages and isinstance(messages, list):
-                self.last_scraped_at = messages[-1].get('scraped_at')
-                self._save_cursor()
+            # DO NOT update cursor here - will be updated after successful broadcast
             
             return new_messages
         except Exception as e:
             logger.error(f"Poll error: {e}")
             return []
+    
+    def update_cursor(self, scraped_at: str):
+        """Update cursor to given scraped_at timestamp after successful processing"""
+        self.last_scraped_at = scraped_at
+        self._save_cursor()
 
 
 sm = SubscriptionManager()
@@ -413,21 +416,38 @@ def _format_collectors_amazon(msg_data: Dict, embed: Dict) -> Tuple[List[str], L
     lines.append("━━━━━━━━━━━━━━━")
     lines.append("")
     
-    # 2. Key Fields (Price, Stock)
+    # 2. ALL Fields (comprehensive)
     fields = embed.get("fields", [])
-    price = None
-    stock = None
+    seen_values = set()
     
     for f in fields:
-        name = clean_text(f.get("name", "")).lower()
+        name = clean_text(f.get("name", ""))
         val = clean_text(f.get("value", ""))
-        if "price" in name and "n/a" not in val.lower(): price = val
-        if "stock" in name and "n/a" not in val.lower(): stock = val
-    
-    if price:
-        lines.append(f"💰 <b>Price:</b> <b>{price}</b>")
-    if stock:
-        lines.append(f"📦 <b>Stock:</b> {stock}")
+        
+        # Skip link/button fields and N/A values
+        if not name or not val: continue
+        if any(kw in name.lower() for kw in ['link', 'atc', 'qt', 'checkout']): continue
+        if "n/a" in val.lower(): continue
+        if val in seen_values: continue
+        seen_values.add(val)
+        
+        # Smart icon selection
+        name_lower = name.lower()
+        if "price" in name_lower: icon = "💰"
+        elif "stock" in name_lower or "in stock" in name_lower: icon = "✅"
+        elif "type" in name_lower: icon = "🔖"
+        elif "size" in name_lower: icon = "📏"
+        elif "quantity" in name_lower or "qty" in name_lower: icon = "🔢"
+        else: icon = "•"
+        
+        # Add currency symbol and bold prices
+        if "price" in name_lower:
+            # Add £ if no currency symbol present
+            if not any(c in val for c in ['£', '$', '€']):
+                val = f"£{val}"
+            lines.append(f"{icon} <b>{name}:</b> <b>{val}</b>")
+        else:
+            lines.append(f"{icon} <b>{name}:</b> {val}")
         
     lines.append("")
     
@@ -445,19 +465,33 @@ def _format_argos(msg_data: Dict, embed: Dict) -> Tuple[List[str], List[List[Inl
     lines.append("━━━━━━━━━━━━━━━")
     lines.append("")
     
+    # Display ALL fields
     fields = embed.get("fields", [])
-    stores = None
+    seen_values = set()
     
     for f in fields:
-        name = clean_text(f.get("name", "")).lower()
+        name = clean_text(f.get("name", ""))
         val = clean_text(f.get("value", ""))
-        if "stores" in name and "n/a" not in val.lower():
-            stores = val
-            
-    if stores:
-        lines.append(f"📍 <b>Availability:</b>")
-        lines.append(f"{stores}")
-        lines.append("")
+        
+        if not name or not val: continue
+        if any(kw in name.lower() for kw in ['link', 'atc', 'qt', 'checkout', 'offer id']): continue
+        if "n/a" in val.lower(): continue
+        if val in seen_values: continue
+        seen_values.add(val)
+        
+        name_lower = name.lower()
+        if "store" in name_lower or "availability" in name_lower: icon = "📍"
+        elif "price" in name_lower: icon = "💰"
+        elif "stock" in name_lower: icon = "✅"
+        elif "size" in name_lower: icon = "📏"
+        else: icon = "•"
+        
+        # Add currency to prices
+        if "price" in name_lower and val:
+            if not any(c in val for c in ['£', '$', '€']):
+                val = f"£{val}"
+        
+        lines.append(f"{icon} <b>{name}:</b> {val}")
     
     return lines, []
 
@@ -494,10 +528,33 @@ def _format_restocks_currys(msg_data: Dict, embed: Dict) -> Tuple[List[str], Lis
     lines.append("━━━━━━━━━━━━━━━")
     lines.append("")
     
-    if price:
-        lines.append(f"💰 <b>Price:</b> {price}")
-    if resell:
-        lines.append(f"📈 <b>Resell/Profit:</b> {resell}")
+    # Display ALL fields with smart prioritization
+    seen_values = set()
+    for f in fields:
+        name = clean_text(f.get("name", ""))
+        val = clean_text(f.get("value", ""))
+        
+        if not name or not val: continue
+        if any(kw in name.lower() for kw in ['link', 'atc', 'qt', 'checkout', 'offer id']): continue  
+        if "n/a" in val.lower(): continue
+        if val in seen_values: continue
+        seen_values.add(val)
+        
+        name_lower = name.lower()
+        if "price" in name_lower: icon = "💰"
+        elif "resell" in name_lower or "profit" in name_lower: icon = "📈"
+        elif "type" in name_lower: icon = "🔖"
+        elif "stock" in name_lower: icon = "✅"
+        elif "product info" in name_lower: icon = "ℹ️"
+        else: icon = "•"
+        
+        if "price" in name_lower:
+            # Add £ if no currency symbol
+            if not any(c in val for c in ['£', '$', '€']):
+                val = f"£{val}"
+            lines.append(f"{icon} <b>{name}:</b> <b>{val}</b>")
+        else:
+            lines.append(f"{icon} <b>{name}:</b> {val}")
         
     lines.append("")
     
@@ -568,24 +625,42 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, List[str], Optional[In
                     name = clean_text(field.get("name", ""))
                     value = clean_text(field.get("value", ""))
                     
-                    if name and value and not any(kw in name.lower() for kw in ['link', 'atc', 'qt']):
+                    if name and value and not any(kw in name.lower() for kw in ['link', 'atc', 'qt', 'checkout', 'offer id']):
                         # Skip N/A values
                         if "n/a" in value.lower(): continue
 
                         if value in seen_values: continue
                         seen_values.add(value)
                         
-                        # Smart emoji mapping
-                        if "status" in name.lower() or "stock" in name.lower(): icon = "✅"
-                        elif "price" in name.lower() or "cost" in name.lower(): icon = "💰"
-                        elif "resell" in name.lower(): icon = "📈"
-                        elif "member" in name.lower(): icon = "👥"
-                        elif "store" in name.lower() or "shop" in name.lower(): icon = "🏪"
-                        elif "size" in name.lower(): icon = "📏"
-                        elif "product" in name.lower(): icon = "📦"
-                        else: icon = "•"
+                        # Enhanced emoji mapping for comprehensive field coverage
+                        name_lower = name.lower()
+                        if "status" in name_lower or "stock" in name_lower or "in stock" in name_lower: 
+                            icon = "✅"
+                        elif "price" in name_lower or "cost" in name_lower: 
+                            icon = "💰"
+                        elif "type" in name_lower:
+                            icon = "🔖"
+                        elif "resell" in name_lower or "profit" in name_lower: 
+                            icon = "📈"
+                        elif "member" in name_lower: 
+                            icon = "👥"
+                        elif "store" in name_lower or "shop" in name_lower: 
+                            icon = "🏪"
+                        elif "size" in name_lower: 
+                            icon = "📏"
+                        elif "product" in name_lower: 
+                            icon = "📦"
+                        elif "region" in name_lower or "location" in name_lower:
+                            icon = "🌍"
+                        elif "quantity" in name_lower or "qty" in name_lower:
+                            icon = "🔢"
+                        else: 
+                            icon = "•"
                         
-                        if "price" in name.lower():
+                        if "price" in name_lower:
+                            # Add £ if no currency symbol
+                            if not any(c in value for c in ['£', '$', '€']):
+                                value = f"£{value}"
                             lines.append(f"{icon} <b>{name}:</b> <b>{value}</b>")
                         else:
                             lines.append(f"{icon} <b>{name}:</b> {value}")
@@ -1155,6 +1230,14 @@ async def _broadcast_job_inner(context: ContextTypes.DEFAULT_TYPE):
             text, images, keyboard = format_telegram_message(msg)
             logger.debug(f"   ✓ Formatted (text={len(text)} chars, images={len(images) if images else 0})")
             
+            # Validate message is not empty
+            if not text or len(text.strip()) == 0:
+                logger.error(f"   ❌ Message {msg_idx + 1} produced empty text - SKIPPING")
+                logger.error(f"      Channel ID: {msg.get('channel_id')}")
+                logger.error(f"      Has embed: {bool(msg.get('raw_data', {}).get('embed'))}")
+                logger.error(f"      Content: {msg.get('content', '')[:100]}")
+                continue
+            
         except Exception as e:
             logger.error(f"   ❌ Failed to format message {msg_idx + 1}: {type(e).__name__}: {e}")
             continue
@@ -1244,14 +1327,26 @@ async def _broadcast_job_inner(context: ContextTypes.DEFAULT_TYPE):
                     logger.warning(f"   ⛔ {uid}: User invalid/blocked")
                 elif "bot was blocked" in error_str.lower():
                     logger.warning(f"   🚫 {uid}: Bot blocked by user")
+                elif "badrequest" in error_str.lower():
+                    # Log full error for BadRequest to diagnose formatting issues
+                    logger.error(f"   ❌ {uid}: BadRequest - {error_str}")
+                    logger.error(f"      Message preview: {text[:200]}...")
                 else:
-                    logger.error(f"   ❌ {uid}: {type(e).__name__}")
+                    logger.error(f"   ❌ {uid}: {type(e).__name__}: {error_str}")
                 failed_count += 1
             
             # Rate limit protection - small delay between users
             await asyncio.sleep(0.05)
         
         logger.info(f"   📊 Message {msg_idx + 1}: ✅ {sent_count} sent, ❌ {failed_count} failed")
+        
+        # Update cursor ONLY after successful processing of this message
+        # This ensures failed messages are retried on next poll
+        if sent_count > 0:  # At least one user received it
+            msg_scraped_at = msg.get("scraped_at")
+            if msg_scraped_at:
+                poller.update_cursor(msg_scraped_at)
+                logger.debug(f"   📌 Cursor updated to: {msg_scraped_at}")
 
 
 # 4. UPDATE run_bot() FUNCTION
