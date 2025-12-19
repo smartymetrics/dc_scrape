@@ -137,6 +137,7 @@ HTML_TEMPLATE = """
         var img = document.getElementById('live-stream');
         var logs = document.getElementById('logs');
         var stats = document.getElementById('stats');
+        var isDragging = false;
         
         socket.on('screenshot', data => img.src = 'data:image/jpeg;base64,' + data);
         socket.on('log', data => {
@@ -184,14 +185,40 @@ HTML_TEMPLATE = """
                 .catch(e => stats.innerHTML = '<span style="color:#ff3333">Error: ' + e + '</span>');
         }
         
-        img.onclick = function(e) {
+        function getCoords(e) {
             var rect = img.getBoundingClientRect();
-            socket.emit('input', {
-                type: 'click', 
+            return {
                 x: (e.clientX - rect.left) / rect.width,
                 y: (e.clientY - rect.top) / rect.height
-            });
+            };
+        }
+
+        img.onmousedown = function(e) {
+            isDragging = true;
+            var coords = getCoords(e);
+            socket.emit('input', { type: 'mousedown', x: coords.x, y: coords.y });
         };
+
+        img.onmousemove = function(e) {
+            if (!isDragging) return;
+            var coords = getCoords(e);
+            socket.emit('input', { type: 'mousemove', x: coords.x, y: coords.y });
+        };
+
+        img.onmouseup = function(e) {
+            isDragging = false;
+            var coords = getCoords(e);
+            socket.emit('input', { type: 'mouseup', x: coords.x, y: coords.y });
+        };
+
+        // Keyboard Support
+        document.addEventListener('keydown', function(e) {
+            // Prevent default browser actions for common keys to avoid scrolling/refreshing
+            if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].indexOf(e.code) > -1) {
+                e.preventDefault();
+            }
+            socket.emit('input', { type: 'keypress', key: e.key });
+        });
         
         setInterval(testStatus, 10000);
     </script>
@@ -768,6 +795,19 @@ async def async_archiver_logic():
                                     await page.mouse.down()
                                     await asyncio.sleep(random.uniform(0.05, 0.12))
                                     await page.mouse.up()
+                                elif act['type'] == 'mousedown':
+                                    vp = page.viewport_size
+                                    await page.mouse.move(act['x'] * vp['width'], act['y'] * vp['height'])
+                                    await page.mouse.down()
+                                elif act['type'] == 'mousemove':
+                                    vp = page.viewport_size
+                                    await page.mouse.move(act['x'] * vp['width'], act['y'] * vp['height'])
+                                elif act['type'] == 'mouseup':
+                                    vp = page.viewport_size
+                                    await page.mouse.move(act['x'] * vp['width'], act['y'] * vp['height'])
+                                    await page.mouse.up()
+                                elif act['type'] == 'keypress':
+                                    await page.keyboard.press(act['key'])
                         except: pass
                         
                         if "discord.com/channels" in page.url and "/login" not in page.url:
