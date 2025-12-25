@@ -182,14 +182,41 @@ class SubscriptionManager:
         self._load_state()
 
     def _load_state(self):
+        """Load state from Supabase with local fallback"""
+        # Load Users
+        users_loaded = False
         try:
             data = supabase_utils.download_file(self.local_users_path, self.remote_users_path, SUPABASE_BUCKET)
-            if data: self.users = json.loads(data)
-        except: pass
+            if data: 
+                self.users = json.loads(data)
+                users_loaded = True
+                logger.info(f"✅ Loaded {len(self.users)} users from Supabase")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to download users from Supabase: {e}")
+            
+        if not users_loaded and os.path.exists(self.local_users_path):
+            try:
+                with open(self.local_users_path, 'r') as f:
+                    self.users = json.load(f)
+                logger.info(f"📂 Loaded {len(self.users)} users from local fallback")
+            except Exception as e:
+                logger.error(f"❌ Failed to load local users fallback: {e}")
+
+        # Load Codes
+        codes_loaded = False
         try:
             data = supabase_utils.download_file(self.local_codes_path, self.remote_codes_path, SUPABASE_BUCKET)
-            if data: self.codes = json.loads(data)
-        except: pass
+            if data:
+                self.codes = json.loads(data)
+                codes_loaded = True
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to download codes from Supabase: {e}")
+
+        if not codes_loaded and os.path.exists(self.local_codes_path):
+            try:
+                with open(self.local_codes_path, 'r') as f:
+                    self.codes = json.load(f)
+            except: pass
 
     def _sync_state(self):
         try:
