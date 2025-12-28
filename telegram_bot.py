@@ -1965,12 +1965,12 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /help - Show this command list
 
 <b>Admin Tools:</b>
-/gen <days> - Generate subscription code
-/test <count> - Test recent alerts
+/gen [days] - Generate subscription code
+/test [count] - Test recent alerts
 
 <b>User Management:</b>
-/add_admin <user_id> - Add an admin
-/remove_admin <user_id> - Remove an admin
+/add_admin [user_id] - Add an admin
+/remove_admin [user_id] - Remove an admin
 """
     elif is_admin(user_id):
         menu_text = """
@@ -1981,8 +1981,8 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /help - Show this command list
 
 <b>Admin Tools:</b>
-/gen <days> - Generate subscription code
-/test <count> - Test recent alerts
+/gen [days] - Generate subscription code
+/test [count] - Test recent alerts
 """
     else:
         menu_text = """
@@ -1994,7 +1994,10 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Use the menu buttons for more options!
 """
     
-    await update.message.reply_text(menu_text, parse_mode=ParseMode.HTML)
+    if update.message:
+        await update.message.reply_text(menu_text, parse_mode=ParseMode.HTML)
+    elif update.callback_query:
+        await update.callback_query.message.reply_text(menu_text, parse_mode=ParseMode.HTML)
 
 # 5. RUN BOT FUNCTION
 def run_bot():
