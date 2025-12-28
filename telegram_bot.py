@@ -1897,13 +1897,13 @@ async def _broadcast_job_inner(context: ContextTypes.DEFAULT_TYPE):
 # Default commands for all users
 DEFAULT_COMMANDS = [
     BotCommand("start", "Start the bot and see main menu"),
-    BotCommand("menu", "Show available commands"),
+    BotCommand("help", "Show available commands"),
 ]
 
 # Additional commands for admins
 ADMIN_COMMANDS = [
     BotCommand("start", "Start the bot and see main menu"),
-    BotCommand("menu", "Show available commands"),
+    BotCommand("help", "Show available commands"),
     BotCommand("gen", "Generate subscription code (e.g., /gen 30)"),
     BotCommand("test", "Test recent alerts (e.g., /test 5)"),
 ]
@@ -1911,7 +1911,7 @@ ADMIN_COMMANDS = [
 # Additional commands for superadmin
 SUPERADMIN_COMMANDS = [
     BotCommand("start", "Start the bot and see main menu"),
-    BotCommand("menu", "Show available commands"),
+    BotCommand("help", "Show available commands"),
     BotCommand("gen", "Generate subscription code (e.g., /gen 30)"),
     BotCommand("test", "Test recent alerts (e.g., /test 5)"),
     BotCommand("add_admin", "Add a user as admin (e.g., /add_admin 123456)"),
@@ -1951,7 +1951,7 @@ async def setup_bot_commands(application: Application) -> None:
     except Exception as e:
         logger.error(f"   ❌ Failed to set command menus: {e}")
 
-async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show available commands based on user role"""
     user_id = str(update.effective_user.id)
     
@@ -1962,7 +1962,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <b>General:</b>
 /start - Main menu & status
-/menu - Show this command list
+/help - Show this command list
 
 <b>Admin Tools:</b>
 /gen <days> - Generate subscription code
@@ -1978,7 +1978,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <b>General:</b>
 /start - Main menu & status
-/menu - Show this command list
+/help - Show this command list
 
 <b>Admin Tools:</b>
 /gen <days> - Generate subscription code
@@ -1989,7 +1989,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📋 <b>Available Commands</b>
 
 /start - Main menu & status
-/menu - Show this command list
+/help - Show this command list
 
 Use the menu buttons for more options!
 """
@@ -2020,7 +2020,7 @@ def run_bot():
         app.add_handler(CommandHandler("add_admin", add_bot_admin))
         app.add_handler(CommandHandler("remove_admin", remove_bot_admin))
         app.add_handler(CommandHandler("test", test_alerts))
-        app.add_handler(CommandHandler("menu", show_menu))  # Menu command
+        app.add_handler(CommandHandler("help", show_help))  # Help command
         app.add_handler(CallbackQueryHandler(button_handler))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
