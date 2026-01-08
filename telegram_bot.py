@@ -4,6 +4,8 @@ import logging
 import threading
 import traceback
 import requests
+import random
+import random
 import asyncio
 import re
 from datetime import datetime, timedelta
@@ -128,47 +130,48 @@ def categorize_links(links: List[Dict[str, str]]) -> Dict[str, List[Dict[str, st
 
 def fetch_product_images(url: str, max_images: int = 3) -> List[str]:
     """
-    Scrape product images from a website URL.
-    Extracts up to max_images high-quality images.
-    Returns list of image URLs.
+    Attempts to scrape high-res product images from a URL.
+    Strategies:
+    1. Meta Tags (og:image)
+    2. JSON-LD (Schema.org Product) - CRITICAL for Shopify/Modern E-commerce
+    3. Img Tags (Heuristic Fallback)
     """
-    if not url or not url.startswith('http'):
-        return []
+    # Rotated User-Agents to avoid blocking (Shopify often block generic requests)
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    ]
     
+    headers = {
+        'User-Agent': random.choice(user_agents),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.google.com/',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1'
+    }
+    
+    images = []
     try:
-        # Set a proper user agent to avoid blocking
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        # Check URL validity
+        if not url or not url.startswith('http'):
+            return []
+            
+        # Requests
+        response = requests.get(url, headers=headers, timeout=10) # 10s timeout
+        if response.status_code != 200:
+            logger.warning(f"   ⚠️ Scrape failed: {response.status_code}")
+            return []
+            
+        soup = BeautifulSoup(response.text, 'html.parser')
+        skip_keywords = ['logo', 'icon', 'banner', 'button', 'sprite', 'loading', 'placeholder', 'blank', 'ajax']
         
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.content, 'html.parser')
-        images = []
-        
-        # Keywords to skip (logos, navigation, UI elements)
-        skip_keywords = [
-            'logo', 'icon', 'placeholder', 'avatar', 'pixel', '1x1', 'spinner', 'loading',
-            'nav', 'menu', 'footer', 'header', 'banner', 'ad', 'social', 'share', 'btn',
-            'badge', 'flag', 'currency', 'rating', 'star', 'heart', 'like', 'comment',
-            'thumbnail', 'thumb', 'variant', 'swatch', 'color-swatch'
-        ]
-        
-        # Keywords that indicate product images (MAIN images preferred)
-        main_product_keywords = [
-            'main', 'gallery', 'hero', 'primary', 'feature', 'featured',
-            'large', 'full', 'display', 'showcase'
-        ]
-        
-        # Secondary product keywords
-        product_keywords = [
-            'product', 'item', 'photo', 'image', 'picture', 'detail',
-            'view', 'front', 'back', 'side'
-        ]
-        
-        # Priority 0: Meta Tags (The most reliable verification)
-        # Sites explicitly define these for social sharing
+        # Priority 0: Meta Tags (Reliable)
         for meta in soup.find_all('meta'):
             prop = meta.get('property', '')
             name = meta.get('name', '')
@@ -178,152 +181,95 @@ def fetch_product_images(url: str, max_images: int = 3) -> List[str]:
                      images.append({
                         'url': meta_url,
                         'alt': 'Meta Tag Image',
-                        'priority': 1000 # Super high priority
+                        'priority': 1000
                      })
 
-        # Priority 1: Look for product images in data attributes and meta tags
+        # Priority 0.5: JSON-LD Structured Data (Reliable E-commerce)
+        try:
+            scripts = soup.find_all('script', type='application/ld+json')
+            for script in scripts:
+                if script.string:
+                    try:
+                        data = json.loads(script.string)
+                        # Normalize to list
+                        items = data if isinstance(data, list) else [data]
+                        
+                        for item in items:
+                            if item.get('@type') in ['Product', 'ItemPage', 'IndividualProduct']:
+                                img_data = item.get('image')
+                                found_imgs = []
+                                
+                                # 'image' can be string, list, or object
+                                if isinstance(img_data, str):
+                                    found_imgs.append(img_data)
+                                elif isinstance(img_data, list):
+                                    for i in img_data:
+                                        if isinstance(i, str): found_imgs.append(i)
+                                        elif isinstance(i, dict) and 'url' in i: found_imgs.append(i['url'])
+                                elif isinstance(img_data, dict) and 'url' in img_data:
+                                    found_imgs.append(img_data['url'])
+                                    
+                                for img_url in found_imgs:
+                                    if img_url and img_url.startswith('http') and not any(k in img_url.lower() for k in skip_keywords):
+                                        images.append({
+                                            'url': img_url,
+                                            'alt': 'JSON-LD Image',
+                                            'priority': 950 # Slightly lower than meta tag but higher than scrape
+                                        })
+                    except: continue
+        except Exception as json_err:
+            logger.warning(f"   ⚠️ JSON-LD error: {json_err}")
+
+        # Priority 1: Img Tags (Heuristic Fallback)
         for img in soup.find_all('img'):
             img_url = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
-            if not img_url:
-                continue
+            if not img_url: continue
             
-            # Convert relative URLs to absolute
-            if img_url.startswith('/'):
+            # Handle relative URLs
+            if img_url.startswith('//'):
+                img_url = 'https:' + img_url
+            elif img_url.startswith('/'):
                 from urllib.parse import urljoin
                 img_url = urljoin(url, img_url)
+                
+            if not img_url.startswith('http'): continue
+            if img_url.startswith('data:'): continue
             
-            # Skip data URIs
-            if img_url.startswith('data:'):
-                continue
-            
-            # 2a. HARD FILTER: Verify it looks like a product image
-            # Discard tiny images which are likely icons
+            # Size Check
             if 'width' in img.attrs and 'height' in img.attrs:
                 try:
                     w = int(str(img['width']).replace('px',''))
                     h = int(str(img['height']).replace('px',''))
-                    if w < 100 or h < 100: continue # Too small to be a product
+                    if w < 100 or h < 100: continue
                 except: pass
             
-            # Skip if URL contains skip keywords
-
             img_url_lower = img_url.lower()
-            if any(skip in img_url_lower for skip in skip_keywords):
-                continue
+            if any(skip in img_url_lower for skip in skip_keywords): continue
             
-            # Get alt text and class info
+            score = 0
             alt_text = img.get('alt', '').lower()
-            img_class = img.get('class', [])
-            if isinstance(img_class, list):
-                img_class = ' '.join(img_class).lower()
-            else:
-                img_class = str(img_class).lower()
+            if 'product' in img_url_lower or 'product' in alt_text: score += 50
+            if 'main' in img_url_lower: score += 20
+            if 'gallery' in img_url_lower: score += 10
+            if 'cdn.shopify.com' in img_url_lower: score += 30
             
-            # Check ID attribute too
-            img_id = img.get('id', '').lower()
-            
-            # Get parent container info
-            parent = img.parent
-            parent_class = ''
-            parent_id = ''
-            if parent:
-                parent_class = parent.get('class', [])
-                if isinstance(parent_class, list):
-                    parent_class = ' '.join(parent_class).lower()
-                else:
-                    parent_class = str(parent_class).lower()
-                
-                parent_id = parent.get('id', '').lower()
-                
-                # Also check grandparent for gallery/main containers
-                grandparent = parent.parent
-                if grandparent:
-                    gp_class = grandparent.get('class', [])
-                    if isinstance(gp_class, list):
-                        gp_class = ' '.join(gp_class).lower()
-                    else:
-                        gp_class = str(gp_class).lower()
-                    parent_class += ' ' + gp_class
-            
-            # Calculate priority score
-            priority = 0
-            
-            # HIGHEST PRIORITY: In main/gallery container
-            if any(kw in parent_class or kw in parent_id for kw in ['main', 'gallery', 'hero', 'primary', 'feature']):
-                priority += 500
-            if any(kw in img_id for kw in ['main', 'gallery', 'hero', 'primary', 'feature']):
-                priority += 450
-            
-            # VERY HIGH PRIORITY: Main product keywords in alt/class
-            if any(kw in alt_text for kw in main_product_keywords):
-                priority += 200
-            if any(kw in img_class for kw in main_product_keywords):
-                priority += 180
-            
-            # HIGH PRIORITY: General product keywords
-            if any(kw in alt_text for kw in product_keywords):
-                priority += 100
-            if any(kw in img_class for kw in product_keywords):
-                priority += 90
-            if any(kw in parent_class for kw in product_keywords):
-                priority += 80
-            
-            # MEDIUM PRIORITY: Product keywords in URL
-            if any(kw in img_url_lower for kw in product_keywords):
-                priority += 50
-            
-            # MEDIUM PRIORITY: Large images (product images usually 300px+)
-            width = img.get('width')
-            height = img.get('height')
-            if width and height:
-                try:
-                    w = int(str(width).replace('px', ''))
-                    h = int(str(height).replace('px', ''))
-                    # Prefer larger images (main product images)
-                    if w >= 500 and h >= 500:
-                        priority += 100
-                    elif w >= 300 and h >= 300:
-                        priority += 50
-                    elif w >= 200 and h >= 200:
-                        priority += 10
-                except:
-                    pass
-            
-            # PENALTY: Likely a variant/option image
-            if any(x in img_url_lower for x in ['variant', 'color', 'option']):
-                priority -= 100
-            
-            # Skip if priority too low (likely decoration/nav)
-            if priority < 10:
-                continue
-            
-            images.append({
-                'url': img_url,
-                'alt': alt_text,
-                'priority': priority
-            })
-        
-        # Sort by priority (highest first)
+            if score > 0:
+                images.append({'url': img_url, 'priority': score})
+
+        # Sort and deduplicate
         images.sort(key=lambda x: x['priority'], reverse=True)
-        
-        # Remove duplicates and return just URLs
         seen = set()
-        result = []
+        final_images = []
         for img in images:
-            img_url = img['url']
-            if img_url not in seen and img_url:
-                seen.add(img_url)
-                result.append(img_url)
-                if len(result) >= max_images:
-                    break
-        
-        logger.info(f"   📸 Scraped {len(result)} product image(s) from website")
-        if result:
-            logger.info(f"      First image: {result[0][:100]}...")
-        return result
-        
+            if img['url'] not in seen and img['url']:
+                seen.add(img['url'])
+                final_images.append(img['url'])
+                
+        logger.info(f"   📸 Scraped {len(final_images)} images via Meta/JSON/HTML.")
+        return final_images[:max_images]
+
     except Exception as e:
-        logger.info(f"   ⚠️ Could not scrape images from {url}: {str(e)}")
+        logger.error(f"   ❌ Scrape error: {e}")
         return []
 
 
