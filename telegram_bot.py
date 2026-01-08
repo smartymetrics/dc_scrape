@@ -177,12 +177,20 @@ def fetch_product_images(url: str, max_images: int = 3) -> List[str]:
             name = meta.get('name', '')
             if prop in ['og:image', 'twitter:image'] or name in ['og:image', 'twitter:image']:
                  meta_url = meta.get('content')
-                 if meta_url and meta_url.startswith('http') and not any(k in meta_url.lower() for k in skip_keywords):
-                     images.append({
-                        'url': meta_url,
-                        'alt': 'Meta Tag Image',
-                        'priority': 1000
-                     })
+                 if meta_url:
+                     # Handle protocol-relative and relative URLs
+                     if meta_url.startswith('//'):
+                         meta_url = 'https:' + meta_url
+                     elif not meta_url.startswith('http'):
+                         from urllib.parse import urljoin
+                         meta_url = urljoin(url, meta_url)
+                         
+                     if meta_url.startswith('http') and not any(k in meta_url.lower() for k in skip_keywords):
+                         images.append({
+                            'url': meta_url,
+                            'alt': 'Meta Tag Image',
+                            'priority': 1000
+                         })
 
         # Priority 0.5: JSON-LD Structured Data (Reliable E-commerce)
         try:
@@ -191,8 +199,14 @@ def fetch_product_images(url: str, max_images: int = 3) -> List[str]:
                 if script.string:
                     try:
                         data = json.loads(script.string)
-                        # Normalize to list
-                        items = data if isinstance(data, list) else [data]
+                        # Normalize to list. Handle @graph structures.
+                        items = []
+                        if isinstance(data, list):
+                            items = data
+                        elif isinstance(data, dict):
+                            if '@graph' in data:
+                                items.extend(data['@graph'])
+                            items.append(data)
                         
                         for item in items:
                             if item.get('@type') in ['Product', 'ItemPage', 'IndividualProduct']:
@@ -210,12 +224,20 @@ def fetch_product_images(url: str, max_images: int = 3) -> List[str]:
                                     found_imgs.append(img_data['url'])
                                     
                                 for img_url in found_imgs:
-                                    if img_url and img_url.startswith('http') and not any(k in img_url.lower() for k in skip_keywords):
-                                        images.append({
-                                            'url': img_url,
-                                            'alt': 'JSON-LD Image',
-                                            'priority': 950 # Slightly lower than meta tag but higher than scrape
-                                        })
+                                    if img_url:
+                                        # Handle relative URLs in JSON-LD too
+                                        if img_url.startswith('//'):
+                                            img_url = 'https:' + img_url
+                                        elif not img_url.startswith('http'):
+                                            from urllib.parse import urljoin
+                                            img_url = urljoin(url, img_url)
+                                            
+                                        if img_url.startswith('http') and not any(k in img_url.lower() for k in skip_keywords):
+                                            images.append({
+                                                'url': img_url,
+                                                'alt': 'JSON-LD Image',
+                                                'priority': 950
+                                            })
                     except: continue
         except Exception as json_err:
             logger.warning(f"   ⚠️ JSON-LD error: {json_err}")
@@ -225,10 +247,10 @@ def fetch_product_images(url: str, max_images: int = 3) -> List[str]:
             img_url = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
             if not img_url: continue
             
-            # Handle relative URLs
+            # Handle protocol-relative and relative URLs
             if img_url.startswith('//'):
                 img_url = 'https:' + img_url
-            elif img_url.startswith('/'):
+            elif not img_url.startswith('http'):
                 from urllib.parse import urljoin
                 img_url = urljoin(url, img_url)
                 
@@ -923,7 +945,8 @@ def format_price_value(value: str) -> str:
             return price
         # Match complete prices only - must not be preceded by decimal point, currency, or digit
         # and must not be followed by % or digit (unless it's the decimal portion)
-        return re.sub(r'(?<![£$€\d.])\d+(?:\.\d{1,2})?(?![%\d])', replacer, text)
+        # Added support for commas as thousands separators: (?:,\d{3})*
+        return re.sub(r'(?<![£$€\d.])\d+(?:,\d{3})*(?:\.\d{1,2})?(?![%\d])', replacer, text)
     
     return add_currency_to_prices(value)
 
