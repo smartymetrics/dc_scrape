@@ -825,7 +825,7 @@ async def async_archiver_logic():
                     wait_cycles = 0
                     while wait_cycles < 120 and not stop_event.is_set():
                         try:
-                            scr = await page.screenshot(quality=40, type='jpeg')
+                            scr = await page.screenshot(quality=85, type='jpeg')
                             socketio.emit('screenshot', base64.b64encode(scr).decode('utf-8'))
                         except: pass
                         
@@ -904,7 +904,7 @@ async def async_archiver_logic():
                         await simulate_human_pause()
                         
                         try:
-                            scr = await page.screenshot(quality=40, type='jpeg')
+                            scr = await page.screenshot(quality=85, type='jpeg')
                             socketio.emit('screenshot', base64.b64encode(scr).decode('utf-8'))
                         except: pass
                         

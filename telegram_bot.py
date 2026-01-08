@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from bs4 import BeautifulSoup
 import supabase_utils
 from dotenv import load_dotenv
 
@@ -117,6 +118,98 @@ def categorize_links(links: List[Dict[str, str]]) -> Dict[str, List[Dict[str, st
             categories['other'].append(link)
     
     return categories
+
+
+# --- IMAGE SCRAPING FROM PRODUCT WEBSITES ---
+
+def fetch_product_images(url: str, max_images: int = 3) -> List[str]:
+    """
+    Scrape product images from a website URL.
+    Extracts up to max_images high-quality images.
+    Returns list of image URLs.
+    """
+    if not url or not url.startswith('http'):
+        return []
+    
+    try:
+        # Set a proper user agent to avoid blocking
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        images = []
+        
+        # Priority 1: Look for product images in data attributes and meta tags
+        for img in soup.find_all('img'):
+            img_url = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
+            if img_url:
+                # Convert relative URLs to absolute
+                if img_url.startswith('/'):
+                    from urllib.parse import urljoin
+                    img_url = urljoin(url, img_url)
+                
+                # Filter out tiny images, logos, and tracking pixels
+                if any(skip in img_url.lower() for skip in ['logo', 'icon', 'placeholder', 'avatar', 'pixel', '1x1']):
+                    continue
+                
+                # Prioritize product images (common patterns)
+                alt_text = img.get('alt', '').lower()
+                is_likely_product = any(kw in alt_text for kw in ['product', 'item', 'photo', 'image', 'picture'])
+                
+                images.append({
+                    'url': img_url,
+                    'alt': alt_text,
+                    'is_product': is_likely_product,
+                    'priority': 1 if is_likely_product else 0
+                })
+        
+        # Sort by priority (product images first)
+        images.sort(key=lambda x: x['priority'], reverse=True)
+        
+        # Remove duplicates and return just URLs
+        seen = set()
+        result = []
+        for img in images:
+            img_url = img['url']
+            if img_url not in seen and img_url:
+                seen.add(img_url)
+                result.append(img_url)
+                if len(result) >= max_images:
+                    break
+        
+        logger.debug(f"   📸 Scraped {len(result)} product images from {url}")
+        return result
+        
+    except Exception as e:
+        logger.debug(f"   ⚠️ Could not scrape images from {url}: {str(e)}")
+        return []
+
+
+def download_image_without_compression(image_url: str) -> Optional[bytes]:
+    """
+    Download an image and return raw bytes without compression.
+    Useful for preserving Discord embed image quality.
+    """
+    if not image_url or not image_url.startswith('http'):
+        return None
+    
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(image_url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        # Return raw bytes to preserve original quality
+        return response.content
+        
+    except Exception as e:
+        logger.debug(f"   ⚠️ Could not download image {image_url}: {str(e)}")
+        return None
 
 
 def add_emoji_to_link_text(text: str) -> str:
@@ -915,7 +1008,7 @@ def _format_restocks_currys(msg_data: Dict, embed: Dict) -> Tuple[List[str], Lis
     
     return lines, []
 
-def format_telegram_message(msg_data: Dict) -> Tuple[str, List[str], Optional[InlineKeyboardMarkup]]:
+def format_telegram_message(msg_data: Dict) -> Tuple[str, List[str], Optional[InlineKeyboardMarkup], List[Tuple[str, bool]]]:
     """
     Dispatcher for channel-specific formatting with Fallback to Generic.
     """
@@ -1057,9 +1150,38 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, List[str], Optional[In
     
     # === IMAGE EXTRACTION ===
     images = []
-    if embed:
-        if embed.get("images"): images.extend(embed["images"][:3])
-        elif embed.get("thumbnail"): images.append(embed["thumbnail"])
+    images_to_download = []  # Track which images need download (from Discord, no compression)
+    
+    # Try to fetch high-quality images from product website first
+    product_url = None
+    if embed and embed.get("links"):
+        for link in embed["links"]:
+            link_text = link.get('text', '').lower()
+            url = link.get('url', '')
+            field = link.get('field', '').lower()
+            
+            # Prioritize "Buy" and product shop links for image scraping
+            if url and url.startswith('http'):
+                if any(kw in link_text for kw in ['buy', 'shop', 'product', 'checkout', 'amazon', 'ebay']):
+                    product_url = url
+                    break
+    
+    # Fetch images from product website
+    if product_url:
+        website_images = fetch_product_images(product_url, max_images=3)
+        if website_images:
+            images.extend(website_images[:3])
+    
+    # Fallback to Discord embed images if no website images found
+    # Mark these for download to preserve original quality without compression
+    if not images and embed:
+        if embed.get("images"): 
+            discord_images = embed["images"][:3]
+            images.extend(discord_images)
+            images_to_download.extend([(img, True) for img in discord_images])
+        elif embed.get("thumbnail"): 
+            images.append(embed["thumbnail"])
+            images_to_download.append((embed["thumbnail"], True))
     
     # === BUTTON CREATION (GENERIC + CUSTOM) ===
     keyboard = []
@@ -1172,10 +1294,8 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, List[str], Optional[In
     if custom_buttons:
         keyboard.extend(custom_buttons)
     
-    return text, images, InlineKeyboardMarkup(keyboard) if keyboard else None
+    return text, images, InlineKeyboardMarkup(keyboard) if keyboard else None, images_to_download
 
-
-    return False
 
 
 def is_duplicate_source(msg_data: Dict) -> bool:
@@ -1319,14 +1439,25 @@ async def test_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         messages.reverse() 
         
         for msg in messages:
-            text, images, keyboard = format_telegram_message(msg)
+            text, images, keyboard, images_to_download = format_telegram_message(msg)
             
             # Send (Admin only)
             if images:
                 try:
-                   await context.bot.send_photo(
+                    # Check if this image needs download for quality preservation
+                    photo_data = images[0]
+                    
+                    # If image is marked for download (from Discord), get raw bytes
+                    for img_url, should_download in images_to_download:
+                        if should_download and img_url == images[0]:
+                            downloaded = download_image_without_compression(img_url)
+                            if downloaded:
+                                photo_data = downloaded
+                            break
+                    
+                    await context.bot.send_photo(
                         chat_id=user_id,
-                        photo=images[0],
+                        photo=photo_data,
                         caption=text,
                         parse_mode=ParseMode.HTML,
                         reply_markup=keyboard
@@ -1771,7 +1902,7 @@ async def _broadcast_job_inner(context: ContextTypes.DEFAULT_TYPE):
     for msg_idx, msg in enumerate(filtered_msgs):
         try:
             logger.debug(f"   🔨 Formatting message {msg_idx + 1}/{len(filtered_msgs)}...")
-            text, images, keyboard = format_telegram_message(msg)
+            text, images, keyboard, images_to_download = format_telegram_message(msg)
             logger.debug(f"   ✓ Formatted (text={len(text)} chars, images={len(images) if images else 0})")
             
             # Validate message is not empty
@@ -1795,10 +1926,21 @@ async def _broadcast_job_inner(context: ContextTypes.DEFAULT_TYPE):
                 # Send with timeout protection
                 if images:
                     try:
+                        # Check if this image needs download for quality preservation
+                        photo_data = images[0]
+                        
+                        # If image is marked for download (from Discord), get raw bytes
+                        for img_url, should_download in images_to_download:
+                            if should_download and img_url == images[0]:
+                                downloaded = download_image_without_compression(img_url)
+                                if downloaded:
+                                    photo_data = downloaded
+                                break
+                        
                         await asyncio.wait_for(
                             context.bot.send_photo(
                                 chat_id=uid,
-                                photo=images[0],
+                                photo=photo_data,
                                 caption=text[:1024],
                                 parse_mode=ParseMode.HTML,
                                 reply_markup=keyboard
@@ -1808,7 +1950,18 @@ async def _broadcast_job_inner(context: ContextTypes.DEFAULT_TYPE):
                         
                         # Send additional images if multiple
                         if len(images) > 1:
-                            media_group = [InputMediaPhoto(img) for img in images[1:3]]
+                            media_group = []
+                            for img in images[1:3]:
+                                # Check if additional images need download too
+                                img_data = img
+                                for img_url, should_download in images_to_download:
+                                    if should_download and img_url == img:
+                                        downloaded = download_image_without_compression(img_url)
+                                        if downloaded:
+                                            img_data = downloaded
+                                        break
+                                media_group.append(InputMediaPhoto(img_data))
+                            
                             await asyncio.wait_for(
                                 context.bot.send_media_group(chat_id=uid, media=media_group),
                                 timeout=10.0
