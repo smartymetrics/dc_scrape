@@ -5,7 +5,6 @@ import threading
 import traceback
 import requests
 import random
-import random
 import asyncio
 import re
 from datetime import datetime, timedelta
@@ -17,6 +16,8 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 from bs4 import BeautifulSoup
 import supabase_utils
 from dotenv import load_dotenv
+from io import BytesIO
+from PIL import Image
 
 load_dotenv()
 
@@ -25,14 +26,12 @@ ADMIN_USER_ID = os.getenv("TELEGRAM_ADMIN_ID")
 SUPABASE_BUCKET = "monitor-data"
 USERS_FILE = "bot_users.json"
 CODES_FILE = "active_codes.json"
-POLL_INTERVAL = 120  # 2 minutes to prevent overlap
-MAX_JOB_RUNTIME = 110  # Maximum allowed runtime
+POLL_INTERVAL = 120
+MAX_JOB_RUNTIME = 110
 POTENTIAL_USERS_FILE = "potential_users.json"
-# JOB LOCK AND TIMEOUT
 broadcast_lock = asyncio.Lock()
 job_start_time = None
 
-# Thread pool for blocking sync operations (image downloading, web scraping)
 sync_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="sync_io")
 
 logging.basicConfig(
@@ -42,44 +41,34 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# Global lock to prevent job overlap
-broadcast_lock = asyncio.Lock()
-
 # --- DATETIME PARSING UTILITY ---
 
 def parse_iso_datetime(iso_string: str) -> datetime:
-    """
-    Parse ISO format datetime string with flexible microseconds.
-    Handles variable-length microsecond strings (3-6 digits).
-    """
+    """Parse ISO format datetime string with flexible microseconds."""
     if not iso_string:
         return datetime.utcnow()
     
     try:
-        # Try direct parsing first
         return datetime.fromisoformat(iso_string)
     except ValueError:
-        # Handle variable-length microseconds
         try:
             if "." in iso_string:
                 parts = iso_string.split(".")
                 if "+" in parts[1]:
                     ms, tz = parts[1].split("+")
-                    ms = (ms + "000000")[:6]  # Pad or truncate to 6 digits
+                    ms = (ms + "000000")[:6]
                     fixed_str = f"{parts[0]}.{ms}+{tz}"
                 elif "-" in parts[1] and parts[1].count("-") > 0:
                     ms, tz = parts[1].rsplit("-", 1)
                     ms = (ms + "000000")[:6]
                     fixed_str = f"{parts[0]}.{ms}-{tz}"
                 else:
-                    # No timezone
                     ms = (parts[1] + "000000")[:6]
                     fixed_str = f"{parts[0]}.{ms}"
                 return datetime.fromisoformat(fixed_str)
         except:
             pass
     
-    # Fallback
     return datetime.utcnow()
 
 # --- LINK PARSING UTILITIES ---
@@ -126,19 +115,249 @@ def categorize_links(links: List[Dict[str, str]]) -> Dict[str, List[Dict[str, st
     return categories
 
 
-# --- IMAGE SCRAPING FROM PRODUCT WEBSITES ---
+# --- IMPROVED IMAGE HANDLING ---
+
+def get_image_dimensions_from_url(url: str) -> Optional[Tuple[int, int]]:
+    """
+    Extract dimensions from Discord proxy URL parameters or estimate from URL patterns.
+    Returns (width, height) or None if cannot determine.
+    """
+    if not url:
+        return None
+    
+    try:
+        # Discord proxy URLs often have width=X&height=Y
+        w_match = re.search(r'[?&]width=(\d+)', url)
+        h_match = re.search(r'[?&]height=(\d+)', url)
+        
+        if w_match and h_match:
+            return (int(w_match.group(1)), int(h_match.group(1)))
+        
+        # Amazon URLs with size indicators like _SL160_
+        size_match = re.search(r'\._[A-Z]*(\d+)_\.', url)
+        if size_match:
+            size = int(size_match.group(1))
+            return (size, size)
+        
+        # eBay URLs with s-lXXX pattern
+        ebay_match = re.search(r's-l(\d+)\.', url)
+        if ebay_match:
+            size = int(ebay_match.group(1))
+            return (size, size)
+            
+    except Exception as e:
+        logger.debug(f"Could not extract dimensions from URL: {e}")
+    
+    return None
+
+
+def is_high_quality_image(url: str, min_dimension: int = 400) -> bool:
+    """
+    Determine if an image URL is likely high quality without downloading it.
+    """
+    if not url:
+        return False
+    
+    # Trusted high-res domains - ALWAYS consider these high quality
+    trusted_domains = [
+        'media-amazon.com',
+        'images-amazon.com', 
+        'ssl-images-amazon.com',
+        'm.media-amazon.com',
+        'ebayimg.com'
+    ]
+    
+    url_lower = url.lower()
+    
+    # Check if it's from a trusted domain
+    is_trusted = any(domain in url_lower for domain in trusted_domains)
+    
+    # Get dimensions if available
+    dimensions = get_image_dimensions_from_url(url)
+    
+    if dimensions:
+        width, height = dimensions
+        # Image is high quality if either dimension is large enough
+        is_large = width >= min_dimension or height >= min_dimension
+        
+        if is_trusted:
+            # For trusted domains, be lenient - even 300px can be good quality
+            return width >= 300 or height >= 300
+        else:
+            return is_large
+    
+    # If we can't determine dimensions but it's from a trusted domain, assume it's good
+    if is_trusted:
+        # But still reject obvious thumbnails
+        if any(pattern in url_lower for pattern in ['_sl160_', '_ac_uy218_', 's-l300', 'thumb', 'icon']):
+            return False
+        return True
+    
+    # For non-Discord proxy URLs from unknown sources, we can't determine without downloading
+    # Conservative: return False to trigger scraping
+    if 'discordapp.net' not in url_lower:
+        return False
+    
+    return False
+
+
+def optimize_image_url(url: str) -> str:
+    """
+    Optimize image URLs to force maximum resolution.
+    CRITICAL: Removes size restrictions from Amazon, eBay, and Discord proxy URLs.
+    """
+    if not url:
+        return url
+    
+    try:
+        original_url = url
+        
+        # 1. Decode Discord Proxy URLs
+        if "images-ext-" in url and "discordapp.net" in url:
+            if "/https/" in url:
+                url = "https://" + url.split("/https/", 1)[1]
+            elif "/http/" in url:
+                url = "http://" + url.split("/http/", 1)[1]
+        
+        # 2. Amazon Image Optimization (CRITICAL)
+        if any(domain in url for domain in ['media-amazon.com', 'images-amazon.com', 'ssl-images-amazon.com']):
+            # Remove ALL size indicators: ._SL160_, ._AC_UY218_, etc.
+            url = re.sub(r'\._[A-Z_]+[0-9]+_\.', '.', url)
+            
+            # Remove query parameters that limit quality
+            if "?" in url:
+                base_url = url.split("?")[0]
+                # Keep only the base URL, no query params
+                url = base_url
+        
+        # 3. eBay Image Optimization
+        if "ebayimg.com" in url:
+            # Force maximum resolution: s-l300 -> s-l1600
+            if re.search(r's-l\d+\.', url):
+                url = re.sub(r's-l\d+\.', 's-l1600.', url)
+            
+            # Remove quality-limiting query params
+            if "?" in url:
+                url = url.split("?")[0]
+        
+        # 4. Remove Discord proxy size limits
+        if "discordapp.net" in url or "discord.com" in url:
+            # Remove width/height parameters
+            url = re.sub(r'[?&](width|height)=\d+', '', url)
+            # Clean up dangling ? or &
+            url = re.sub(r'\?&', '?', url)
+            url = re.sub(r'[?&]$', '', url)
+        
+        if url != original_url:
+            logger.debug(f"   ✨ Optimized URL: {original_url[:80]} -> {url[:80]}")
+        
+        return url
+                
+    except Exception as e:
+        logger.error(f"Image optimization error: {e}")
+        return url
+
+
+def download_image_high_quality(image_url: str, max_size_mb: int = 10) -> Optional[bytes]:
+    """
+    Download image preserving maximum quality.
+    Returns raw bytes without compression.
+    """
+    if not image_url or not image_url.startswith('http'):
+        return None
+    
+    # Optimize URL first to get best quality
+    image_url = optimize_image_url(image_url)
+    
+    try:
+        # Realistic headers to avoid 403 errors
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.google.com/',
+            'Sec-Fetch-Dest': 'image',
+            'Sec-Fetch-Mode': 'no-cors',
+            'Sec-Fetch-Site': 'cross-site',
+            'Cache-Control': 'no-cache'
+        }
+        
+        # Add domain-specific headers
+        if 'amazon' in image_url:
+            headers['Referer'] = 'https://www.amazon.com/'
+        elif 'ebay' in image_url:
+            headers['Referer'] = 'https://www.ebay.com/'
+        
+        response = requests.get(image_url, headers=headers, timeout=15, stream=True)
+        response.raise_for_status()
+        
+        # Check content type
+        content_type = response.headers.get('Content-Type', '')
+        if not content_type.startswith('image/'):
+            logger.warning(f"   ⚠️ Invalid content type: {content_type}")
+            return None
+        
+        # Download with size limit
+        max_size_bytes = max_size_mb * 1024 * 1024
+        downloaded = b''
+        
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                downloaded += chunk
+                if len(downloaded) > max_size_bytes:
+                    logger.warning(f"   ⚠️ Image too large (>{max_size_mb}MB)")
+                    return None
+        
+        # Verify it's a valid image by trying to open it
+        try:
+            img = Image.open(BytesIO(downloaded))
+            width, height = img.size
+            logger.info(f"   ✅ Downloaded image: {width}x{height} ({len(downloaded)//1024}KB)")
+            
+            # CRITICAL: Return original bytes, DO NOT re-encode
+            return downloaded
+            
+        except Exception as img_err:
+            logger.warning(f"   ⚠️ Invalid image data: {img_err}")
+            return None
+        
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 403:
+            logger.warning(f"   🚫 403 Forbidden: {image_url[:80]}")
+        elif e.response.status_code == 404:
+            logger.warning(f"   ❌ 404 Not Found: {image_url[:80]}")
+        else:
+            logger.warning(f"   ⚠️ HTTP {e.response.status_code}: {image_url[:80]}")
+        return None
+        
+    except requests.exceptions.Timeout:
+        logger.warning(f"   ⏱️ Timeout downloading: {image_url[:80]}")
+        return None
+        
+    except Exception as e:
+        logger.warning(f"   ⚠️ Download error: {str(e)[:80]}")
+        return None
+
 
 def fetch_product_images(url: str, max_images: int = 3) -> List[str]:
     """
-    Attempts to scrape high-res product images from a URL.
-    Strategies:
-    1. Meta Tags (og:image)
-    2. JSON-LD (Schema.org Product) - CRITICAL for Shopify/Modern E-commerce
-    3. Img Tags (Heuristic Fallback)
+    Scrape high-res product images from a URL with improved anti-blocking.
     """
-    # Rotated User-Agents to avoid blocking (Shopify often block generic requests)
+    # Skip known non-product pages
+    skip_scrape = any(x in url.lower() for x in [
+        'keepa.com', 'ebay.com/sch', 'camelcamelcamel',
+        'login', 'cart', 'checkout', 'account', 'signin'
+    ])
+    
+    if skip_scrape:
+        logger.debug(f"   ⏭️ Skipping scrape of non-product page")
+        return []
+    
+    # Enhanced User-Agent rotation
     user_agents = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
         'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -148,58 +367,62 @@ def fetch_product_images(url: str, max_images: int = 3) -> List[str]:
         'User-Agent': random.choice(user_agents),
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
         'Referer': 'https://www.google.com/',
         'Upgrade-Insecure-Requests': '1',
         'Sec-Fetch-Dest': 'document',
         'Sec-Fetch-Mode': 'navigate',
         'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1'
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0'
     }
     
     images = []
+    
     try:
-        # Check URL validity
         if not url or not url.startswith('http'):
             return []
-            
-        # Requests
-        response = requests.get(url, headers=headers, timeout=10) # 10s timeout
-        if response.status_code != 200:
-            logger.warning(f"   ⚠️ Scrape failed: {response.status_code}")
+        
+        response = requests.get(url, headers=headers, timeout=12)
+        
+        if response.status_code == 403:
+            logger.warning(f"   🚫 403 Forbidden - site blocking scraper")
             return []
-            
+        
+        if response.status_code != 200:
+            logger.warning(f"   ⚠️ Scrape failed: HTTP {response.status_code}")
+            return []
+        
         soup = BeautifulSoup(response.text, 'html.parser')
         skip_keywords = ['logo', 'icon', 'banner', 'button', 'sprite', 'loading', 'placeholder', 'blank', 'ajax']
         
-        # Priority 0: Meta Tags (Reliable)
+        # Priority 0: Meta Tags
         for meta in soup.find_all('meta'):
             prop = meta.get('property', '')
             name = meta.get('name', '')
             if prop in ['og:image', 'twitter:image'] or name in ['og:image', 'twitter:image']:
-                 meta_url = meta.get('content')
-                 if meta_url:
-                     # Handle protocol-relative and relative URLs
-                     if meta_url.startswith('//'):
-                         meta_url = 'https:' + meta_url
-                     elif not meta_url.startswith('http'):
-                         from urllib.parse import urljoin
-                         meta_url = urljoin(url, meta_url)
-                         
-                     if meta_url.startswith('http') and not any(k in meta_url.lower() for k in skip_keywords):
-                         images.append({
+                meta_url = meta.get('content')
+                if meta_url:
+                    if meta_url.startswith('//'):
+                        meta_url = 'https:' + meta_url
+                    elif not meta_url.startswith('http'):
+                        from urllib.parse import urljoin
+                        meta_url = urljoin(url, meta_url)
+                    
+                    if meta_url.startswith('http') and not any(k in meta_url.lower() for k in skip_keywords):
+                        images.append({
                             'url': meta_url,
                             'alt': 'Meta Tag Image',
                             'priority': 1000
-                         })
-
-        # Priority 0.5: JSON-LD Structured Data (Reliable E-commerce)
+                        })
+        
+        # Priority 1: JSON-LD Structured Data
         try:
             scripts = soup.find_all('script', type='application/ld+json')
             for script in scripts:
                 if script.string:
                     try:
                         data = json.loads(script.string)
-                        # Normalize to list. Handle @graph structures.
                         items = []
                         if isinstance(data, list):
                             items = data
@@ -213,109 +436,103 @@ def fetch_product_images(url: str, max_images: int = 3) -> List[str]:
                                 img_data = item.get('image')
                                 found_imgs = []
                                 
-                                # 'image' can be string, list, or object
                                 if isinstance(img_data, str):
                                     found_imgs.append(img_data)
                                 elif isinstance(img_data, list):
                                     for i in img_data:
-                                        if isinstance(i, str): found_imgs.append(i)
-                                        elif isinstance(i, dict) and 'url' in i: found_imgs.append(i['url'])
+                                        if isinstance(i, str):
+                                            found_imgs.append(i)
+                                        elif isinstance(i, dict) and 'url' in i:
+                                            found_imgs.append(i['url'])
                                 elif isinstance(img_data, dict) and 'url' in img_data:
                                     found_imgs.append(img_data['url'])
-                                    
+                                
                                 for img_url in found_imgs:
                                     if img_url:
-                                        # Handle relative URLs in JSON-LD too
                                         if img_url.startswith('//'):
                                             img_url = 'https:' + img_url
                                         elif not img_url.startswith('http'):
                                             from urllib.parse import urljoin
                                             img_url = urljoin(url, img_url)
-                                            
+                                        
                                         if img_url.startswith('http') and not any(k in img_url.lower() for k in skip_keywords):
                                             images.append({
                                                 'url': img_url,
                                                 'alt': 'JSON-LD Image',
                                                 'priority': 950
                                             })
-                    except: continue
+                    except:
+                        continue
         except Exception as json_err:
-            logger.warning(f"   ⚠️ JSON-LD error: {json_err}")
-
-        # Priority 1: Img Tags (Heuristic Fallback)
+            logger.debug(f"   JSON-LD parse error: {json_err}")
+        
+        # Priority 2: Img Tags
         for img in soup.find_all('img'):
             img_url = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
-            if not img_url: continue
+            if not img_url:
+                continue
             
-            # Handle protocol-relative and relative URLs
             if img_url.startswith('//'):
                 img_url = 'https:' + img_url
             elif not img_url.startswith('http'):
                 from urllib.parse import urljoin
                 img_url = urljoin(url, img_url)
-                
-            if not img_url.startswith('http'): continue
-            if img_url.startswith('data:'): continue
             
-            # Size Check
+            if not img_url.startswith('http') or img_url.startswith('data:'):
+                continue
+            
+            # Size check
             if 'width' in img.attrs and 'height' in img.attrs:
                 try:
-                    w = int(str(img['width']).replace('px',''))
-                    h = int(str(img['height']).replace('px',''))
-                    if w < 100 or h < 100: continue
-                except: pass
+                    w = int(str(img['width']).replace('px', ''))
+                    h = int(str(img['height']).replace('px', ''))
+                    if w < 100 or h < 100:
+                        continue
+                except:
+                    pass
             
             img_url_lower = img_url.lower()
-            if any(skip in img_url_lower for skip in skip_keywords): continue
+            if any(skip in img_url_lower for skip in skip_keywords):
+                continue
             
             score = 0
             alt_text = img.get('alt', '').lower()
-            if 'product' in img_url_lower or 'product' in alt_text: score += 50
-            if 'main' in img_url_lower: score += 20
-            if 'gallery' in img_url_lower: score += 10
-            if 'cdn.shopify.com' in img_url_lower: score += 30
+            if 'product' in img_url_lower or 'product' in alt_text:
+                score += 50
+            if 'main' in img_url_lower:
+                score += 20
+            if 'gallery' in img_url_lower:
+                score += 10
+            if 'cdn.shopify.com' in img_url_lower:
+                score += 30
             
             if score > 0:
                 images.append({'url': img_url, 'priority': score})
-
+        
         # Sort and deduplicate
         images.sort(key=lambda x: x['priority'], reverse=True)
         seen = set()
         final_images = []
+        
         for img in images:
             if img['url'] not in seen and img['url']:
                 seen.add(img['url'])
                 final_images.append(img['url'])
-                
-        logger.info(f"   📸 Scraped {len(final_images)} images via Meta/JSON/HTML.")
+        
+        if final_images:
+            logger.info(f"   📸 Scraped {len(final_images)} image(s)")
+        
         return final_images[:max_images]
-
-    except Exception as e:
-        logger.error(f"   ❌ Scrape error: {e}")
-        return []
-
-
-def download_image_without_compression(image_url: str) -> Optional[bytes]:
-    """
-    Download an image and return raw bytes without compression.
-    Useful for preserving Discord embed image quality.
-    """
-    if not image_url or not image_url.startswith('http'):
-        return None
     
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        response = requests.get(image_url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        # Return raw bytes to preserve original quality
-        return response.content
-        
+    except requests.exceptions.Timeout:
+        logger.warning(f"   ⏱️ Scrape timeout")
+        return []
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"   ⚠️ Scrape error: {str(e)[:80]}")
+        return []
     except Exception as e:
-        logger.info(f"   ⚠️ Could not download image {image_url}: {str(e)}")
-        return None
+        logger.error(f"   ❌ Scrape error: {str(e)[:80]}")
+        return []
 
 
 def add_emoji_to_link_text(text: str) -> str:
@@ -323,7 +540,7 @@ def add_emoji_to_link_text(text: str) -> str:
     emojis = {
         'sold': '💰', 'active': '⚡', 'google': '🔍', 'ebay': '🛒',
         'keepa': '📈', 'amazon': '🔎', 'selleramp': '💎', 'camel': '🐫',
-        'buy': '🛒', 'shop': '🏪', 'cart': '🛒', 'checkout': '✅',
+        'buy': '🛒', 'shop': '🪀', 'cart': '🛒', 'checkout': '✅',
     }
     
     text_lower = text.lower()
@@ -335,10 +552,7 @@ def add_emoji_to_link_text(text: str) -> str:
 
 
 def parse_tag_line(tag: str) -> Dict[str, Optional[str]]:
-    """
-    Parse Discord tag line above embeds.
-    Example: "@Product Flips | [UK] CRW-001-1ER | Casio | Just restocked for £0.00"
-    """
+    """Parse Discord tag line above embeds."""
     if not tag:
         return {}
     
@@ -386,7 +600,6 @@ class SubscriptionManager:
 
     def _load_state(self):
         """Load state from Supabase with local fallback"""
-        # Load Users
         users_loaded = False
         try:
             data = supabase_utils.download_file(self.local_users_path, self.remote_users_path, SUPABASE_BUCKET)
@@ -405,7 +618,6 @@ class SubscriptionManager:
             except Exception as e:
                 logger.error(f"❌ Failed to load local users fallback: {e}")
 
-        # Load Codes
         codes_loaded = False
         try:
             data = supabase_utils.download_file(self.local_codes_path, self.remote_codes_path, SUPABASE_BUCKET)
@@ -421,7 +633,6 @@ class SubscriptionManager:
                     self.codes = json.load(f)
             except: pass
 
-        # Load Potential Users
         potential_loaded = False
         try:
             data = supabase_utils.download_file(self.local_potential_path, self.remote_potential_path, SUPABASE_BUCKET)
@@ -473,7 +684,6 @@ class SubscriptionManager:
                 "alerts_paused": False,
                 "joined_at": self.users.get(str(user_id), {}).get("joined_at", datetime.utcnow().isoformat())
             }
-            # Remove from potential users if they were there
             if str(user_id) in self.potential_users:
                 self.potential_users.pop(str(user_id))
             self._sync_state()
