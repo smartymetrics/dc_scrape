@@ -151,7 +151,7 @@ def get_image_dimensions_from_url(url: str) -> Optional[Tuple[int, int]]:
     return None
 
 
-def is_high_quality_image(url: str, min_dimension: int = 400) -> bool:
+def is_high_quality_image(url: str, min_dimension: int = 160) -> bool:
     """
     Determine if an image URL is likely high quality without downloading it.
     """
@@ -1548,7 +1548,7 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, Optional[str], Optiona
                 
                 # Trust it if it's high res (>= 400px in either dimension)
                 # This covers long thin images or wide banners correctly
-                if width >= 400 or height >= 400:
+                if width >= 160 or height >= 160:
                     image_url = discord_candidate
                     image_bytes = downloaded
                     logger.info(f"   📸 ✅ Discord image is High-Res pixels ({width}x{height}). Skipping scrape.")
