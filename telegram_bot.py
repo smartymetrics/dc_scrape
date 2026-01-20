@@ -1195,6 +1195,7 @@ REGEX_PATTERNS_TO_REMOVE = [
     r'Monitors\s+v[\d.]+\s*\|\s*CCN\s+x\s+Zephyr\s+Monitors\s*\[\d{2}:\d{2}:\d{2}\]',
     r'\s*\|\s*CCN\s+x\s+Zephyr\s+Monitors\s+\[[^\]]+\].*',
     r'Today\s+at\s+\d{1,2}:\d{2}\s*(?:AM|PM)',
+    r'Experimental\s+software\.\s+AI\s+can\s+be\s+inaccurate,\s+DYOR!',
 ]
 
 def clean_text(text: str) -> str:
@@ -1574,7 +1575,9 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, Optional[str], Optiona
         # FOOTER (Common)
         footer = embed.get("footer")
         if footer and "ccn" not in footer.lower() and "monitor" not in footer.lower():
-            lines.append(f"⏰ {footer}")
+            cleaned_footer = clean_text(footer)
+            if cleaned_footer:
+                lines.append(f"⏰ {cleaned_footer}")
         else:
             scraped_time = parse_iso_datetime(msg_data.get("scraped_at", datetime.utcnow().isoformat()))
             lines.append(f"⏰ {scraped_time.strftime('%H:%M UTC')}")
@@ -1620,7 +1623,7 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, Optional[str], Optiona
     for link in all_links:
         text_lower = link.get('text', '').lower()
         url = link.get('url', '')
-        link_text = link.get('text', 'Link')
+        link_text = clean_text(link.get('text', 'Link'))
         field = link.get('field', '').lower()
         link_type = link.get('type', '').lower() # Check for 'title' type
         
