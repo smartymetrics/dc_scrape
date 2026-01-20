@@ -1927,6 +1927,19 @@ async def test_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         messages.reverse() 
         
         for msg in messages:
+            # CHECK CATEGORY SUBSCRIPTION
+            msg_channel_id = str(msg.get("channel_id"))
+            msg_category = "Uncategorized"
+            for c in cm.channels:
+                if c['id'] == msg_channel_id:
+                    msg_category = c.get('category', 'Uncategorized')
+                    break
+            
+            user_cats = sm.get_user_categories(user_id)
+            if msg_category not in user_cats:
+                logger.debug(f"   ⏭️ Skipping test alert for {user_id}: {msg_category} not in {user_cats}")
+                continue
+
             text, image_url, keyboard, image_bytes = format_telegram_message(msg)
             
             # Prepare photo data once
