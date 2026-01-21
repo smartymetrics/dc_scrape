@@ -746,329 +746,339 @@ async def async_archiver_logic():
             with open(last_ids_path, 'r') as f: last_ids = json.load(f)
         except: pass
 
-    async with async_playwright() as p:
-        user_agent = get_realistic_user_agent()
-        log(f"🎭 UA: {user_agent[:60]}...")
+    while not stop_event.is_set():
+        try:
+            async with async_playwright() as p:
+                user_agent = get_realistic_user_agent()
+                log(f"🎭 UA: {user_agent[:60]}...")
         
-        browser = await p.chromium.launch(
-            headless=HEADLESS_MODE,
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage',
-                '--no-sandbox',
-                '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process',
-                '--disable-site-isolation-trials',
-                f'--user-agent={user_agent}'
-            ]
-        )
+                browser = await p.chromium.launch(
+                    headless=HEADLESS_MODE,
+                    args=[
+                        '--disable-blink-features=AutomationControlled',
+                        '--disable-dev-shm-usage',
+                        '--no-sandbox',
+                        '--disable-web-security',
+                        '--disable-features=IsolateOrigins,site-per-process',
+                        '--disable-site-isolation-trials',
+                        '--disable-gpu',
+                        '--proxy-bypass-list=*',
+                        f'--user-agent={user_agent}'
+                    ]
+                )
         
-        # Randomize viewport (common resolutions)
-        viewports = [
-            {'width': 1920, 'height': 1080},
-            {'width': 1366, 'height': 768},
-            {'width': 1536, 'height': 864},
-            {'width': 1440, 'height': 900},
-            {'width': 2560, 'height': 1440}
-        ]
-        viewport = random.choice(viewports)
-        
-        context = await browser.new_context(
-            viewport=viewport,
-            user_agent=user_agent,
-            storage_state=state_path if os.path.exists(state_path) else None,
-            locale='en-US',
-            timezone_id='America/New_York',
-            permissions=['notifications'],
-            color_scheme='dark' if random.random() > 0.3 else 'light',
-            device_scale_factor=random.choice([1, 1.25, 1.5, 2])
-        )
-        
-        # Maximum anti-detection scripts
-        await context.add_init_script("""
-            // Remove webdriver flag
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-            
-            // Randomize plugins
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => {
-                    const plugins = [
-                        {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
-                        {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
-                        {name: 'Native Client', filename: 'internal-nacl-plugin'}
-                    ];
-                    return plugins;
-                }
-            });
-            
-            // Override chrome object
-            window.chrome = {
-                runtime: {},
-                loadTimes: function() {},
-                csi: function() {},
-                app: {}
-            };
-            
-            // Add realistic timing
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-            );
-            
-            // Remove automation indicators
-            delete navigator.__proto__.webdriver;
-        """)
-        
-        page = await context.new_page()
-        set_status("RUNNING")
-
-        while not stop_event.is_set():
-            try:
-                # Random idle break check
-                if random.random() < IDLE_BREAK_CHANCE:
-                    await take_idle_break()
-                    if stop_event.is_set(): break
+                # Randomize viewport (common resolutions)
+                viewports = [
+                    {'width': 1920, 'height': 1080},
+                    {'width': 1366, 'height': 768},
+                    {'width': 1536, 'height': 864},
+                    {'width': 1440, 'height': 900},
+                    {'width': 2560, 'height': 1440}
+                ]
+                viewport = random.choice(viewports)
                 
-                # Login Logic
-                if "login" in page.url or "discord.com/channels" not in page.url:
-                    log("🔐 Login required...")
-                    try: 
-                        await page.goto("https://discord.com/login", timeout=10000)
-                        await smart_delay(2, 5)
-                    except: pass
-                    
-                    account_picker_detected = await detect_account_picker(page)
-                    if account_picker_detected:
-                        log("👤 Account picker detected")
-                        send_telegram_alert("Account Picker", "Manual selection needed", "warning")
-                    
-                    wait_cycles = 0
-                    while wait_cycles < 120 and not stop_event.is_set():
-                        try:
-                            scr = await page.screenshot(quality=85, type='jpeg')
-                            socketio.emit('screenshot', base64.b64encode(scr).decode('utf-8'))
-                        except: pass
-                        
-                        try:
-                            while not input_queue.empty():
-                                act = input_queue.get_nowait()
-                                if act['type'] == 'click':
-                                    vp = page.viewport_size
-                                    # Realistic click offset
-                                    x_jitter = random.gauss(0, 3)
-                                    y_jitter = random.gauss(0, 3)
-                                    x = (act['x'] * vp['width']) + x_jitter
-                                    y = (act['y'] * vp['height']) + y_jitter
-                                    
-                                    # Simulate human click (press + delay + release)
-                                    await page.mouse.move(x, y)
-                                    await asyncio.sleep(random.uniform(0.05, 0.15))
-                                    await page.mouse.down()
-                                    await asyncio.sleep(random.uniform(0.05, 0.12))
-                                    await page.mouse.up()
-                                elif act['type'] == 'mousedown':
-                                    vp = page.viewport_size
-                                    await page.mouse.move(act['x'] * vp['width'], act['y'] * vp['height'])
-                                    await page.mouse.down()
-                                elif act['type'] == 'mousemove':
-                                    vp = page.viewport_size
-                                    await page.mouse.move(act['x'] * vp['width'], act['y'] * vp['height'])
-                                elif act['type'] == 'mouseup':
-                                    vp = page.viewport_size
-                                    await page.mouse.move(act['x'] * vp['width'], act['y'] * vp['height'])
-                                    await page.mouse.up()
-                                elif act['type'] == 'keypress':
-                                    await page.keyboard.press(act['key'])
-                        except: pass
-                        
-                        if "discord.com/channels" in page.url and "/login" not in page.url:
-                            await context.storage_state(path=state_path)
-                            supabase_utils.upload_file(state_path, SUPABASE_BUCKET, remote_state_path, debug=False)
-                            log("✅ Login success!")
-                            await smart_delay(3, 7)
-                            break
-                        
-                        await asyncio.sleep(5)
-                        wait_cycles += 1
-                        if wait_cycles % 10 == 0: log(f"⏳ {wait_cycles*5}s elapsed...")
-
-                # Shuffle channels for unpredictability
-                # DYNAMIC CHANNEL LOADING
-                cm.reload() # Sync from Supabase if needed
-                enabled_channels = cm.get_enabled_channels()
-                channels_to_check = [c['url'] for c in enabled_channels]
-                if not channels_to_check:
-                    log("⚠️ No enabled channels found in config. Waiting...")
-                    await asyncio.sleep(60)
-                    continue
-
-                random.shuffle(channels_to_check)
+                context = await browser.new_context(
+                    viewport=viewport,
+                    user_agent=user_agent,
+                    storage_state=state_path if os.path.exists(state_path) else None,
+                    locale='en-US',
+                    timezone_id='America/New_York',
+                    permissions=['notifications'],
+                    color_scheme='dark' if random.random() > 0.3 else 'light',
+                    device_scale_factor=random.choice([1, 1.25, 1.5, 2])
+                )
                 
-                # Randomly skip some channels sometimes (10% chance per channel)
-                if random.random() < 0.3:
-                    skip_count = random.randint(0, min(2, len(channels_to_check)))
-                    if skip_count > 0:
-                        channels_to_check = channels_to_check[skip_count:]
-                        log(f"🎲 Randomly skipping {skip_count} channel(s) this cycle")
+                # Maximum anti-detection scripts
+                await context.add_init_script("""
+                    // Remove webdriver flag
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+                    
+                    // Randomize plugins
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => {
+                            const plugins = [
+                                {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
+                                {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
+                                {name: 'Native Client', filename: 'internal-nacl-plugin'}
+                            ];
+                            return plugins;
+                        }
+                    });
+                    
+                    // Override chrome object
+                    window.chrome = {
+                        runtime: {},
+                        loadTimes: function() {},
+                        csi: function() {},
+                        app: {}
+                    };
+                    
+                    // Add realistic timing
+                    const originalQuery = window.navigator.permissions.query;
+                    window.navigator.permissions.query = (parameters) => (
+                        parameters.name === 'notifications' ?
+                            Promise.resolve({ state: Notification.permission }) :
+                            originalQuery(parameters)
+                    );
+                    
+                    // Remove automation indicators
+                    delete navigator.__proto__.webdriver;
+                """)
                 
-                for channel_url in channels_to_check:
-                    if stop_event.is_set(): break
-                    
-                    # Persistent failure check
-                    if archiver_state["error_counts"].get(channel_url, 0) > 2:
-                        log(f"   🔄 Channel {channel_url.split('/')[-1]} has high error count. Hard refreshing...")
-                        try:
-                            await page.reload(timeout=30000)
-                            await smart_delay(5, 10)
-                        except: pass
+                page = await context.new_page()
+                set_status("RUNNING")
 
-                    archiver_state["total_checks"] += 1
-                    log(f"📂 [{archiver_state['total_checks']}] {channel_url.split('/')[-1]}")
-                    
+                while not stop_event.is_set():
                     try:
-                        await page.goto(channel_url, timeout=30000)
-                        await smart_delay(2, 5)
+                        # Random idle break check
+                        if random.random() < IDLE_BREAK_CHANCE:
+                            await take_idle_break()
+                            if stop_event.is_set(): break
                         
-                        # Human behavior simulation
-                        if random.random() < MOUSE_MOVEMENT_CHANCE:
-                            await advanced_mouse_movement(page)
-                        
-                        if random.random() < SCROLL_CHANCE:
-                            await realistic_scroll_behavior(page)
-                        
-                        # Random pause (thinking/reading)
-                        await simulate_human_pause()
-                        
-                        try:
-                            scr = await page.screenshot(quality=85, type='jpeg')
-                            socketio.emit('screenshot', base64.b64encode(scr).decode('utf-8'))
-                        except: pass
-                        
-                        selector, messages = await wait_for_messages_to_load(page)
-                        if not messages:
-                            log("   ⚠️ No messages")
-                            # Diagnostic info
-                            page_title = await page.title()
-                            page_url = page.url
-                            err_screenshot = None
-                            try:
-                                err_screenshot = await page.screenshot(quality=70, type='jpeg')
+                        # Login Logic
+                        if "login" in page.url or "discord.com/channels" not in page.url:
+                            log("🔐 Login required...")
+                            try: 
+                                await page.goto("https://discord.com/login", timeout=10000)
+                                await smart_delay(2, 5)
                             except: pass
                             
-                            track_channel_error(channel_url, f"No messages found.\nURL: {page_url}\nTitle: {page_title}", image_bytes=err_screenshot)
-                            await smart_delay(CHANNEL_DELAY_MIN, CHANNEL_DELAY_MAX)
-                            continue
-                        
-                        # Simulate reading
-                        await simulate_reading_pattern(page)
-                        
-                        count = await messages.count()
-                        batch = []
-                        current_ids = last_ids.get(channel_url, [])
-                        
-                        debug_saved = False
-                        for i in range(max(0, count - 10), count):
-                            msg = messages.nth(i)
-                            raw_id = await msg.get_attribute('id') or await msg.get_attribute('data-list-item-id') or ""
-                            # Discord snowflake IDs are 17-19 digits. Extract the final numeric segment.
-                            # Example: "chat-messages___chat-messages-1367813504786108526-1453954492323074244" -> "1453954492323074244"
-                            match = re.search(r'(\d{17,19})$', raw_id)
-                            msg_id = match.group(1) if match else raw_id.replace('chat-messages-', '').replace('message-', '')
+                            account_picker_detected = await detect_account_picker(page)
+                            if account_picker_detected:
+                                log("👤 Account picker detected")
+                                send_telegram_alert("Account Picker", "Manual selection needed", "warning")
                             
-                            if not msg_id or msg_id in current_ids: continue
-                            
-                            if DEBUG_MODE and not debug_saved:
-                                await save_message_html_for_inspection(msg, msg_id)
-                                debug_saved = True
-                            
-                            author_data = await extract_message_author(msg)
-                            embed_data = await extract_embed_data(msg)
-                            
-                            content_loc = msg.locator('[id^="message-content-"]').first
-                            plain_content = await content_loc.inner_text() if await content_loc.count() else ""
-                            
-                            message_data = {
-                                "id": int(msg_id) if msg_id.isdigit() else abs(hash(msg_id)) % (10 ** 15),
-                                "channel_id": channel_url.split('/')[-1],
-                                "content": clean_text(plain_content),
-                                "scraped_at": datetime.utcnow().isoformat(),
-                                "raw_data": {
-                                    "author": author_data,
-                                    "channel_url": channel_url,
-                                    "embed": embed_data,
-                                    "has_embed": embed_data is not None
-                                }
-                            }
-                            
-                            hash_content = {
-                                "content": plain_content,
-                                "embed_title": embed_data.get("title") if embed_data else None,
-                                "embed_desc": embed_data.get("description") if embed_data else None
-                            }
-                            message_data["raw_data"]["content_hash"] = generate_content_hash(hash_content)
-                            
-                            batch.append(message_data)
-                            current_ids.append(msg_id)
-                            
-                            if embed_data:
-                                title = (embed_data.get('title') or 'No title')[:40]
-                                log(f"   ✅ {title}...")
-                                if embed_data.get('links'):
-                                    log(f"      🔗 {len(embed_data['links'])} link(s)")
-                            else:
-                                log(f"   📝 {plain_content[:40]}...")
-                            
-                            # Random micro-delay between messages
-                            await asyncio.sleep(random.gauss(0.2, 0.1))
+                            wait_cycles = 0
+                            while wait_cycles < 120 and not stop_event.is_set():
+                                try:
+                                    scr = await page.screenshot(quality=85, type='jpeg')
+                                    socketio.emit('screenshot', base64.b64encode(scr).decode('utf-8'))
+                                except: pass
+                                
+                                try:
+                                    while not input_queue.empty():
+                                        act = input_queue.get_nowait()
+                                        if act['type'] == 'click':
+                                            vp = page.viewport_size
+                                            # Realistic click offset
+                                            x_jitter = random.gauss(0, 3)
+                                            y_jitter = random.gauss(0, 3)
+                                            x = (act['x'] * vp['width']) + x_jitter
+                                            y = (act['y'] * vp['height']) + y_jitter
+                                            
+                                            # Simulate human click (press + delay + release)
+                                            await page.mouse.move(x, y)
+                                            await asyncio.sleep(random.uniform(0.05, 0.15))
+                                            await page.mouse.down()
+                                            await asyncio.sleep(random.uniform(0.05, 0.12))
+                                            await page.mouse.up()
+                                        elif act['type'] == 'mousedown':
+                                            vp = page.viewport_size
+                                            await page.mouse.move(act['x'] * vp['width'], act['y'] * vp['height'])
+                                            await page.mouse.down()
+                                        elif act['type'] == 'mousemove':
+                                            vp = page.viewport_size
+                                            await page.mouse.move(act['x'] * vp['width'], act['y'] * vp['height'])
+                                        elif act['type'] == 'mouseup':
+                                            vp = page.viewport_size
+                                            await page.mouse.move(act['x'] * vp['width'], act['y'] * vp['height'])
+                                            await page.mouse.up()
+                                        elif act['type'] == 'keypress':
+                                            await page.keyboard.press(act['key'])
+                                except: pass
+                                
+                                if "discord.com/channels" in page.url and "/login" not in page.url:
+                                    await context.storage_state(path=state_path)
+                                    supabase_utils.upload_file(state_path, SUPABASE_BUCKET, remote_state_path, debug=False)
+                                    log("✅ Login success!")
+                                    await smart_delay(3, 7)
+                                    break
+                                
+                                await asyncio.sleep(5)
+                                wait_cycles += 1
+                                if wait_cycles % 10 == 0: log(f"⏳ {wait_cycles*5}s elapsed...")
 
-                        if batch:
-                            log(f"   ⬆️ {len(batch)} new message(s)")
-                            supabase_utils.insert_discord_messages(batch)
-                            last_ids[channel_url] = current_ids[-200:]
-                            with open(last_ids_path, 'w') as f: json.dump(last_ids, f)
+                        # Shuffle channels for unpredictability
+                        # DYNAMIC CHANNEL LOADING
+                        cm.reload() # Sync from Supabase if needed
+                        enabled_channels = cm.get_enabled_channels()
+                        channels_to_check = [c['url'] for c in enabled_channels]
+                        if not channels_to_check:
+                            log("⚠️ No enabled channels found in config. Waiting...")
+                            await asyncio.sleep(60)
+                            continue
+
+                        random.shuffle(channels_to_check)
                         
-                        track_channel_success(channel_url)
-                        await smart_delay(CHANNEL_DELAY_MIN, CHANNEL_DELAY_MAX)
+                        # Randomly skip some channels sometimes (10% chance per channel)
+                        if random.random() < 0.3:
+                            skip_count = random.randint(0, min(2, len(channels_to_check)))
+                            if skip_count > 0:
+                                channels_to_check = channels_to_check[skip_count:]
+                                log(f"🎲 Randomly skipping {skip_count} channel(s) this cycle")
+                        
+                        for channel_url in channels_to_check:
+                            if stop_event.is_set(): break
+                            
+                            # Persistent failure check
+                            if archiver_state["error_counts"].get(channel_url, 0) > 2:
+                                log(f"   🔄 Channel {channel_url.split('/')[-1]} has high error count. Hard refreshing...")
+                                try:
+                                    await page.reload(timeout=30000)
+                                    await smart_delay(5, 10)
+                                except: pass
+
+                            archiver_state["total_checks"] += 1
+                            log(f"📂 [{archiver_state['total_checks']}] {channel_url.split('/')[-1]}")
+                            
+                            try:
+                                await page.goto(channel_url, timeout=30000)
+                                await smart_delay(2, 5)
+                                
+                                # Human behavior simulation
+                                if random.random() < MOUSE_MOVEMENT_CHANCE:
+                                    await advanced_mouse_movement(page)
+                                
+                                if random.random() < SCROLL_CHANCE:
+                                    await realistic_scroll_behavior(page)
+                                
+                                # Random pause (thinking/reading)
+                                await simulate_human_pause()
+                                
+                                try:
+                                    scr = await page.screenshot(quality=85, type='jpeg')
+                                    socketio.emit('screenshot', base64.b64encode(scr).decode('utf-8'))
+                                except: pass
+                                
+                                selector, messages = await wait_for_messages_to_load(page)
+                                if not messages:
+                                    log("   ⚠️ No messages")
+                                    # Diagnostic info
+                                    page_title = await page.title()
+                                    page_url = page.url
+                                    err_screenshot = None
+                                    try:
+                                        err_screenshot = await page.screenshot(quality=70, type='jpeg')
+                                    except: pass
+                                    
+                                    track_channel_error(channel_url, f"No messages found.\nURL: {page_url}\nTitle: {page_title}", image_bytes=err_screenshot)
+                                    await smart_delay(CHANNEL_DELAY_MIN, CHANNEL_DELAY_MAX)
+                                    continue
+                                
+                                # Simulate reading
+                                await simulate_reading_pattern(page)
+                                
+                                count = await messages.count()
+                                batch = []
+                                current_ids = last_ids.get(channel_url, [])
+                                
+                                debug_saved = False
+                                for i in range(max(0, count - 10), count):
+                                    msg = messages.nth(i)
+                                    raw_id = await msg.get_attribute('id') or await msg.get_attribute('data-list-item-id') or ""
+                                    # Discord snowflake IDs are 17-19 digits. Extract the final numeric segment.
+                                    match = re.search(r'(\d{17,19})$', raw_id)
+                                    msg_id = match.group(1) if match else raw_id.replace('chat-messages-', '').replace('message-', '')
+                                    
+                                    if not msg_id or msg_id in current_ids: continue
+                                    
+                                    if DEBUG_MODE and not debug_saved:
+                                        await save_message_html_for_inspection(msg, msg_id)
+                                        debug_saved = True
+                                    
+                                    author_data = await extract_message_author(msg)
+                                    embed_data = await extract_embed_data(msg)
+                                    
+                                    content_loc = msg.locator('[id^="message-content-"]').first
+                                    plain_content = await content_loc.inner_text() if await content_loc.count() else ""
+                                    
+                                    message_data = {
+                                        "id": int(msg_id) if msg_id.isdigit() else abs(hash(msg_id)) % (10 ** 15),
+                                        "channel_id": channel_url.split('/')[-1],
+                                        "content": clean_text(plain_content),
+                                        "scraped_at": datetime.utcnow().isoformat(),
+                                        "raw_data": {
+                                            "author": author_data,
+                                            "channel_url": channel_url,
+                                            "embed": embed_data,
+                                            "has_embed": embed_data is not None
+                                        }
+                                    }
+                                    
+                                    hash_content = {
+                                        "content": plain_content,
+                                        "embed_title": embed_data.get("title") if embed_data else None,
+                                        "embed_desc": embed_data.get("description") if embed_data else None
+                                    }
+                                    message_data["raw_data"]["content_hash"] = generate_content_hash(hash_content)
+                                    
+                                    batch.append(message_data)
+                                    current_ids.append(msg_id)
+                                    
+                                    if embed_data:
+                                        title = (embed_data.get('title') or 'No title')[:40]
+                                        log(f"   ✅ {title}...")
+                                        if embed_data.get('links'):
+                                            log(f"      🔗 {len(embed_data['links'])} link(s)")
+                                    else:
+                                        log(f"   📝 {plain_content[:40]}...")
+                                    
+                                    # Random micro-delay between messages
+                                    await asyncio.sleep(random.gauss(0.2, 0.1))
+
+                                if batch:
+                                    log(f"   ⬆️ {len(batch)} new message(s)")
+                                    supabase_utils.insert_discord_messages(batch)
+                                    last_ids[channel_url] = current_ids[-200:]
+                                    with open(last_ids_path, 'w') as f: json.dump(last_ids, f)
+                                
+                                track_channel_success(channel_url)
+                                await smart_delay(CHANNEL_DELAY_MIN, CHANNEL_DELAY_MAX)
+
+                            except Exception as e:
+                                import traceback
+                                tb = traceback.format_exc()
+                                log(f"   ⚠️ Exception in channel loop: {str(e)}")
+                                # Diagnostic info
+                                page_title = "Unknown"
+                                page_url = channel_url
+                                err_screenshot = None
+                                try:
+                                    page_title = await page.title()
+                                    page_url = page.url
+                                    err_screenshot = await page.screenshot(quality=70, type='jpeg')
+                                except: pass
+                                track_channel_error(channel_url, f"{str(e)}\nURL: {page_url}\nTitle: {page_title}\n\nTraceback:\n{tb}", image_bytes=err_screenshot)
+                                await smart_delay(4, 8)
+
+                        # Randomized next check interval
+                        next_check = get_next_check_interval()
+                        log(f"💤 Next: {int(next_check)}s (Stats: {archiver_state['total_checks']} checks, {archiver_state['mouse_movements']} moves, {archiver_state['scrolls_performed']} scrolls)")
+                        
+                        for _ in range(int(next_check)):
+                            if stop_event.is_set(): break
+                            await asyncio.sleep(1)
 
                     except Exception as e:
-                        import traceback
-                        tb = traceback.format_exc()
-                        log(f"   ⚠️ Exception in channel loop: {str(e)}")
-                        
-                        # Diagnostic info
-                        page_title = "Unknown"
-                        page_url = channel_url
-                        err_screenshot = None
-                        try:
-                            page_title = await page.title()
-                            page_url = page.url
-                            err_screenshot = await page.screenshot(quality=70, type='jpeg')
-                        except: pass
-                        
-                        track_channel_error(channel_url, f"{str(e)}\nURL: {page_url}\nTitle: {page_title}\n\nTraceback:\n{tb}", image_bytes=err_screenshot)
-                        await smart_delay(4, 8)
-
-                # Randomized next check interval
-                next_check = get_next_check_interval()
-                log(f"💤 Next: {int(next_check)}s (Stats: {archiver_state['total_checks']} checks, {archiver_state['mouse_movements']} moves, {archiver_state['scrolls_performed']} scrolls)")
+                        log(f"💥 Browser loop error: {str(e)[:100]}")
+                        if "Page crashed" in str(e) or "Target closed" in str(e) or "Browser closed" in str(e):
+                            log("🔄 Critical browser failure detected. Restarting session...")
+                            break # Break inner loop to re-init playwright
+                        await asyncio.sleep(15)
                 
-                for _ in range(int(next_check)):
-                    if stop_event.is_set(): break
-                    await asyncio.sleep(1)
+                if context:
+                    await context.close()
+                if browser:
+                    await browser.close()
+                log("✅ Browser session closed")
 
-            except Exception as e:
-                log(f"💥 Critical: {str(e)[:100]}")
-                await asyncio.sleep(15)
-        
-        if context:
-            await context.close()
-        if browser:
-            await browser.close()
-        log("✅ Session ended")
+        except Exception as e:
+            log(f"💥 Top-level error: {str(e)[:100]}")
+            await asyncio.sleep(15)
+    
+    log("✅ Archiver logic stopped")
     
     set_status("STOPPED")
 

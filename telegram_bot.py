@@ -19,6 +19,7 @@ import supabase_utils
 from dotenv import load_dotenv
 from io import BytesIO
 from PIL import Image
+import hashlib
 
 load_dotenv()
 
@@ -986,7 +987,6 @@ class MessagePoller:
             if raw_sig == "||":
                 return hashlib.md5(content.encode()).hexdigest() if content else str(msg.get("id"))
                 
-            import hashlib
             return hashlib.md5(raw_sig.encode()).hexdigest()
         except Exception as e:
             logger.error(f"Error generating signature: {e}")
@@ -1187,7 +1187,9 @@ PHRASES_TO_REMOVE = [
     "@Unfiltered",
     "CCN",
     "@Product Flips",
-    "Experimental software. AI can be inaccurate, DYOR!"
+    "Experimental software. AI can be inaccurate, DYOR!",
+    "www.crepchiefnotify.com",
+    "CrepChiefNotify"
 ]
 
 # Regex patterns to remove (for dynamic content like timestamps)
@@ -1199,9 +1201,13 @@ REGEX_PATTERNS_TO_REMOVE = [
 ]
 
 def clean_text(text: str) -> str:
-    """Remove unwanted phrases from text"""
+    """Remove unwanted phrases from text and clean up markdown links"""
     if not text:
         return text
+    
+    # NEW: Strip markdown links [Text](URL) -> Text
+    # We do this FIRST so PHRASES_TO_REMOVE can target the cleaned text
+    text = re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', r'\1', text)
     
     # Remove literal phrases
     for phrase in PHRASES_TO_REMOVE:
@@ -1521,10 +1527,19 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, Optional[str], Optiona
             
             # DESC
             if embed.get("description"):
-                desc = clean_text(embed["description"])[:400]
-                if len(clean_text(embed["description"])) > 400: desc += "..."
-                lines.append(desc)
-                lines.append("")
+                desc_text = clean_text(embed["description"])
+                # NEW: Title Prefix Deduplication
+                # If desc starts with the exact title, strip it
+                if title and desc_text.lower().startswith(title.lower()):
+                    desc_text = desc_text[len(title):].strip()
+                    if desc_text.startswith(":") or desc_text.startswith("-") or desc_text.startswith("|"):
+                        desc_text = desc_text[1:].strip()
+                
+                if desc_text:
+                    desc_display = desc_text[:400]
+                    if len(desc_text) > 400: desc_display += "..."
+                    lines.append(desc_display)
+                    lines.append("")
             
             # FIELDS
             seen_values = set()
@@ -1585,11 +1600,13 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, Optional[str], Optiona
     else:
         # HUMAN MESSAGE FALLBACK (Refined)
         if plain_content:
-            # Don't show generic title if content is short/simple
-            if tag_info.get("product_code"): lines.append(f"📦 <b>{clean_text(tag_info['product_code'])}</b>")
-            
-            # Clean up content
+            product_code = clean_text(tag_info.get("product_code") or "")
             content_display = clean_text(plain_content)
+            
+            # Don't show generic title if it's identical to the content
+            if product_code and product_code.lower() != content_display.lower():
+                lines.append(f"📦 <b>{product_code}</b>")
+            
             # If content starts with "Restocks |", bold it or make it a header
             if content_display.lower().startswith("restocks |"):
                 parts = content_display.split("|")
@@ -2513,11 +2530,41 @@ async def _broadcast_job_inner(context: ContextTypes.DEFAULT_TYPE):
         logger.debug("🔭 Poll: No new messages found")
         return
     
-    # Filter out duplicate sources and unwanted restock alerts
-    filtered_msgs = [
-        msg for msg in new_msgs 
-        if not is_duplicate_source(msg) and not is_restock_filter_match(msg)
-    ]
+    # Filter out duplicate sources, unwanted restock alerts, and noisy patterns
+    filtered_msgs = []
+    
+    # Noise/Restock patterns to filter
+    NOISE_PATTERNS = ["@Currys +", "Just restocked for"]
+    # Keywords that override filtering (instructions)
+    INSTRUCTION_KEYWORDS = ["refresh", "details", "access", "step", "tip", "screen", "wait"]
+
+    for msg in new_msgs:
+        # LAYER A: Existing filters (Duplicate source/Restock filter)
+        if is_duplicate_source(msg) or is_restock_filter_match(msg):
+            continue
+            
+        # LAYER B: Aggressive Duplicate Content Check (If Title == Description/Content)
+        # We check this before formatting to save CPU
+        raw = msg.get("raw_data", {})
+        embed = raw.get("embed") or {}
+        title = (embed.get("title") or "").strip().lower()
+        desc = (embed.get("description") or "").strip().lower()
+        content = (msg.get("content") or "").strip().lower()
+        
+        if title and (title == desc or title == content):
+            logger.info(f"⏭️ FILTERED: Identical Title and Content ({msg.get('id')})")
+            continue
+
+        # LAYER C: Noisy Mass-Restock Alerts (e.g. Currys)
+        # We don't filter if it looks like an instruction
+        is_instruction = any(kw in (desc + content).lower() for kw in INSTRUCTION_KEYWORDS)
+        if not is_instruction:
+            is_noise = any(pattern.lower() in (desc + content).lower() for pattern in NOISE_PATTERNS)
+            if is_noise:
+                logger.info(f"⏭️ FILTERED: Noisy restock pattern ({msg.get('id')})")
+                continue
+
+        filtered_msgs.append(msg)
     
     if len(filtered_msgs) < len(new_msgs):
         skipped_count = len(new_msgs) - len(filtered_msgs)
