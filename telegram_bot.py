@@ -614,7 +614,46 @@ class SubscriptionManager:
                 logger.info(f"✅ Loaded {len(self.users)} users from Supabase")
         except Exception as e:
             logger.warning(f"⚠️ Failed to download users from Supabase: {e}")
-            
+
+        if not users_loaded and os.path.exists(self.local_users_path):
+            try:
+                with open(self.local_users_path, 'r') as f:
+                    self.users = json.load(f)
+                logger.info(f"📂 Loaded {len(self.users)} users from local fallback")
+            except Exception as e:
+                logger.error(f"❌ Failed to load local users fallback: {e}")
+
+        # Load Codes
+        codes_loaded = False
+        try:
+            data = supabase_utils.download_file(self.local_codes_path, self.remote_codes_path, SUPABASE_BUCKET)
+            if data:
+                self.codes = json.loads(data)
+                codes_loaded = True
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to download codes from Supabase: {e}")
+
+        if not codes_loaded and os.path.exists(self.local_codes_path):
+            try:
+                with open(self.local_codes_path, 'r') as f:
+                    self.codes = json.load(f)
+            except: pass
+
+        # Load Potential Users
+        potential_loaded = False
+        try:
+            data = supabase_utils.download_file(self.local_potential_path, self.remote_potential_path, SUPABASE_BUCKET)
+            if data:
+                self.potential_users = json.loads(data)
+                potential_loaded = True
+        except: pass
+
+        if not potential_loaded and os.path.exists(self.local_potential_path):
+            try:
+                with open(self.local_potential_path, 'r') as f:
+                    self.potential_users = json.load(f)
+            except: pass
+
     def get_user_categories(self, user_id: str) -> List[str]:
         """Get enabled categories for a user (default to all if not set)"""
         uid = str(user_id)
@@ -651,43 +690,6 @@ class SubscriptionManager:
             
             self._sync_state()
             return new_state
-            
-        if not users_loaded and os.path.exists(self.local_users_path):
-            try:
-                with open(self.local_users_path, 'r') as f:
-                    self.users = json.load(f)
-                logger.info(f"📂 Loaded {len(self.users)} users from local fallback")
-            except Exception as e:
-                logger.error(f"❌ Failed to load local users fallback: {e}")
-
-        codes_loaded = False
-        try:
-            data = supabase_utils.download_file(self.local_codes_path, self.remote_codes_path, SUPABASE_BUCKET)
-            if data:
-                self.codes = json.loads(data)
-                codes_loaded = True
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to download codes from Supabase: {e}")
-
-        if not codes_loaded and os.path.exists(self.local_codes_path):
-            try:
-                with open(self.local_codes_path, 'r') as f:
-                    self.codes = json.load(f)
-            except: pass
-
-        potential_loaded = False
-        try:
-            data = supabase_utils.download_file(self.local_potential_path, self.remote_potential_path, SUPABASE_BUCKET)
-            if data:
-                self.potential_users = json.loads(data)
-                potential_loaded = True
-        except: pass
-
-        if not potential_loaded and os.path.exists(self.local_potential_path):
-            try:
-                with open(self.local_potential_path, 'r') as f:
-                    self.potential_users = json.load(f)
-            except: pass
 
     def _sync_state(self):
         try:
@@ -3213,6 +3215,10 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /start - Main menu & status
 /help - Show this command list
 
+<b>Broadcast & Announcements:</b>
+/broadcast - Send message/photo to users
+/unpin_all - Clear all pinned messages
+
 <b>Admin Tools:</b>
 /gen [days] - Generate subscription code
 /test [count] - Test recent alerts
@@ -3233,6 +3239,10 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <b>General:</b>
 /start - Main menu & status
 /help - Show this command list
+
+<b>Broadcast & Announcements:</b>
+/broadcast - Send message/photo to users
+/unpin_all - Clear all pinned messages
 
 <b>Admin Tools:</b>
 /gen [days] - Generate subscription code
