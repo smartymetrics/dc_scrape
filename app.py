@@ -12,7 +12,9 @@ import nest_asyncio
 import subprocess
 import hashlib
 import re
+import re
 import random
+import math
 from datetime import datetime, timedelta
 from flask import Flask, render_template_string, jsonify
 from flask_socketio import SocketIO
@@ -33,8 +35,10 @@ TELEGRAM_ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID")
 
 SUPABASE_BUCKET = "monitor-data"
 UPLOAD_FOLDER = "discord_josh"
+UPLOAD_FOLDER = "discord_josh"
 STORAGE_STATE_FILE = "storage_state.json"
 LAST_MESSAGE_ID_FILE = "last_message_ids.json"
+CHANNEL_METRICS_FILE = "channel_metrics.json"
 DATA_DIR = "data"
 
 HEADLESS_MODE = os.getenv("HEADLESS", "True").lower() == "true"
@@ -63,6 +67,10 @@ IDLE_BREAK_CHANCE = 0.15      # 15% chance for long idle break
 IDLE_BREAK_MIN = 180          # 3 min idle
 IDLE_BREAK_MAX = 600          # 10 min idle (simulate AFK)
 
+LONG_SLEEP_MIN = 180          # 3 min sleep
+LONG_SLEEP_MAX = 1200         # 20 min sleep
+LONG_SLEEP_CHANCE = 0.05      # 5% chance after batch
+
 ERROR_THRESHOLD = 5
 ALERT_COOLDOWN = 1800
 
@@ -85,6 +93,11 @@ archiver_state = {
     "idle_breaks_taken": 0,
     "mouse_movements": 0,
     "scrolls_performed": 0,
+    "idle_breaks_taken": 0,
+    "mouse_movements": 0,
+    "scrolls_performed": 0,
+    "checks_since_idle": 0,  # Explicit counter for forced breaks
+    "long_sleeps_taken": 0,
     "channel_metrics": {}  # {url: {'msg_count': 0, 'last_check': 0}}
 }
 stop_event = threading.Event()
@@ -424,6 +437,348 @@ async def take_idle_break():
     
     log(f"🔄 Returning from idle break")
 
+async def take_long_sleep():
+    """Simulate user logging off or sleeping (1-3 hours)"""
+    archiver_state["long_sleeps_taken"] += 1
+    sleep_duration = random.randint(LONG_SLEEP_MIN, LONG_SLEEP_MAX)
+    
+    log(f"😴 Taking LONG SLEEP ({sleep_duration//3600}h {(sleep_duration%3600)//60}m) - Simulating downtime...")
+    set_status("SLEEPING")
+    
+    # Break into chunks
+    for _ in range(sleep_duration):
+        if stop_event.is_set(): break
+        await asyncio.sleep(1)
+        
+    set_status("RUNNING")
+    log(f"⏰ Waking up from long sleep")
+
+async def navigate_to_channel(page, channel_url):
+    """
+    Navigate to a channel by clicking (human-like) or fallback to direct URL.
+    URL format: https://discord.com/channels/{server_id}/{channel_id}
+    """
+    try:
+        parts = channel_url.rstrip('/').split('/')
+        if len(parts) < 2:
+            log(f"   ⚠️ Invalid URL format, using direct nav")
+            await page.goto(channel_url, timeout=30000)
+            return
+            
+        channel_id = parts[-1]
+        server_id = parts[-2]
+        
+        log(f"   🖱️ Click Nav: Server={server_id}, Channel={channel_id}")
+        
+        # Check if we're already on the right server
+        current_url = page.url
+        current_server = current_url.split('/channels/')[-1].split('/')[0] if '/channels/' in current_url else None
+        
+        # --- STEP 1: Click Server Icon (if needed) ---
+        if current_server != server_id:
+            log(f"   🖱️ Server switch detected: {current_server} -> {server_id}")
+            log(f"   🖱️ Switching to server...")
+            server_selectors = [
+                f'[data-list-item-id="guildsnav___{server_id}"]',
+                f'a[href*="/channels/{server_id}"]',
+                f'div[data-dnd-name] a[href*="/{server_id}"]',
+            ]
+            server_clicked = False
+            
+            # FAR LEFT SCROLLER (Servers)
+            server_scroller = page.locator('nav[aria-label*="Servers"], [class*="guilds"], [class*="listItem"]').first
+            
+            for attempt in range(4):  # Try finding and scrolling server list
+                for sel in server_selectors:
+                    try:
+                        server_icon = page.locator(sel).first
+                        if await server_icon.count() > 0:
+                            # Ensure it's in view
+                            await server_icon.scroll_into_view_if_needed(timeout=2000)
+                            await asyncio.sleep(0.3)
+                            
+                            if await server_icon.is_visible():
+                                await server_icon.hover()
+                                await asyncio.sleep(random.uniform(0.2, 0.5))
+                                await server_icon.click()
+                                log(f"   ✅ Server icon clicked")
+                                await asyncio.sleep(random.uniform(2.0, 4.0)) # Wait longer for server switch
+                                server_clicked = True
+                                break
+                    except: continue
+                
+                if server_clicked: break
+                    
+                # Scroll the server list specifically
+                try:
+                    if await server_scroller.count() > 0:
+                        log(f"   📜 Scrolling Server list (Attempt {attempt+1})...")
+                        await server_scroller.evaluate("el => el.scrollBy(0, 300)")
+                        await asyncio.sleep(0.6)
+                except: break
+            
+            if not server_clicked:
+                log(f"   ⚠️ Server icon not found after scrolling, forcing URL")
+                await save_sidebar_html(page, f"server_sidebar_{server_id}")
+                await page.goto(f"https://discord.com/channels/{server_id}", timeout=20000)
+                await asyncio.sleep(random.uniform(3.0, 5.0))
+        else:
+            log(f"   ✅ Already on correct server")
+        
+        # --- STEP 1.5: Wait for channel list to populate ---
+        log(f"   ⏳ Waiting for channel list to load...")
+        try:
+            # Check for loading indicators
+            loading_selectors = [
+                '[class*="loading-"]',
+                '[class*="scrollerBase"] >> text="Loading"',
+                'div[class*="loading"]'
+            ]
+            loading_visible = False
+            for ls in loading_selectors:
+                if await page.locator(ls).count() > 0:
+                    loading_visible = True
+                    break
+            
+            if loading_visible:
+                log(f"   ⏳ Discord showing loading state, waiting...")
+                # Wait for loading to hide, but don't hang forever
+                try:
+                    await page.wait_for_selector('[class*="loading"]', state="hidden", timeout=10000)
+                except:
+                    log(f"   ⚠️ Loading indicator persistent, forcing continue...")
+
+            # Wait for any channel-like link to ensure sidebar is populated
+            await page.wait_for_selector('nav[aria-label*="Channels"] a[href*="/channels/"], [class*="sidebar"] a[href*="/channels/"]', timeout=10000)
+            await asyncio.sleep(random.uniform(1.5, 3.0)) 
+        except Exception as e:
+            log(f"   ⚠️ Channel list load slow: {e}")
+        
+        # --- STEP 2: Expand collapsed categories ---
+        await expand_collapsed_categories(page)
+        
+        # --- STEP 3: Click Channel in Sidebar ---
+        log(f"   🖱️ Looking for channel in sidebar...")
+        channel_selectors = [
+            f'a[href$="/{channel_id}"]',
+            f'a[href*="/{server_id}/{channel_id}"]',
+            f'[data-list-item-id="channels___{channel_id}"]',
+            f'li[id*="{channel_id}"] a',
+            f'div[class*="containerDefault"] a[href*="/{channel_id}"]',
+        ]
+        
+        clicked = False
+        # Target the scroller specifically inside the Channels area (middle panel)
+        # 1. Try nav with 'channel' label but NOT 'server' (most reliable)
+        # 2. Try scroller inside sidebar container
+        # 3. Fallback to broad channelsList
+        channel_list_container = page.locator('nav[aria-label*="channel"]:not([aria-label*="server"]) [class*="scrollerBase"], [class*="sidebar"] nav [class*="scrollerBase"], [class*="channelsList"] [class*="scrollerBase"]').first
+        
+        # DEBUG: Log container label to verify isolation
+        try:
+            if await channel_list_container.count() > 0:
+                parent_nav = channel_list_container.locator('xpath=./ancestor::nav').first
+                label = await parent_nav.get_attribute("aria-label") or "Unknown"
+                log(f"   📂 Channel scroller active (Label: {label})")
+        except: pass
+
+        # Human-like: Hover mouse over sidebar to focus it for scrolling
+        try:
+            await channel_list_container.hover()
+            await asyncio.sleep(0.5)
+        except: pass
+
+        # --- ATTEMPT 1: Search and Scroll ---
+        for attempt in range(8):  # Even more attempts for deep channel trees
+            # 1. Expand categories every 2 attempts
+            if attempt % 2 == 0:
+                await expand_collapsed_categories(page)
+
+            # 2. Check all selectors
+            for selector in channel_selectors:
+                try:
+                    channel_elem = page.locator(selector).first
+                    if await channel_elem.count() > 0:
+                        # Scroll to it
+                        await channel_elem.scroll_into_view_if_needed(timeout=2000)
+                        await asyncio.sleep(0.5)
+                        
+                        if await channel_elem.is_visible():
+                            await channel_elem.hover()
+                            await asyncio.sleep(random.uniform(0.2, 0.4))
+                            await channel_elem.click()
+                            clicked = True
+                            log(f"   ✅ Channel clicked via sidebar")
+                            await asyncio.sleep(random.uniform(1.0, 2.0))
+                            break
+                except: continue
+            
+            if clicked: break
+            
+            # 3. Scroll down bit by bit
+            try:
+                if await channel_list_container.count() > 0:
+                    log(f"   📜 Scrolling down (Attempt {attempt+1})...")
+                    # Use a smaller scroll for better discovery
+                    await channel_list_container.evaluate("el => el.scrollBy(0, 300)")
+                    await asyncio.sleep(0.8) # Wait for virtual scroller to render
+                else: break
+            except: break
+
+        # --- ATTEMPT 2: Reset to top and try one last time ---
+        if not clicked:
+            try:
+                log(f"   📜 Resetting scroll to top and checking one last time...")
+                if await channel_list_container.count() > 0:
+                    await channel_list_container.evaluate("el => el.scrollTo(0, 0)")
+                    await asyncio.sleep(1.0)
+                    for selector in channel_selectors:
+                        channel_elem = page.locator(selector).first
+                        if await channel_elem.count() > 0:
+                            await channel_elem.click()
+                            clicked = True
+                            log(f"   ✅ Channel clicked after scroll reset")
+                            break
+            except: pass
+        
+        # --- FALLBACK: Reload and try one last time (THE ULTIMATE FIX) ---
+        if not clicked:
+            log(f"   ⚠️ Channel still not found. Hard refreshing page...")
+            try:
+                await page.reload(timeout=30000)
+                await smart_delay(5, 8)
+                await expand_collapsed_categories(page)
+                # Quick check after reload
+                for selector in channel_selectors:
+                    channel_elem = page.locator(selector).first
+                    if await channel_elem.count() > 0:
+                        await channel_elem.click()
+                        clicked = True
+                        log(f"   ✅ Channel clicked after hard refresh")
+                        break
+            except: pass
+
+        # --- FINAL FALLBACK: Direct URL ---
+        if not clicked:
+            log(f"   ⚠️ Channel not clickable, saving sidebar for inspection...")
+            await save_sidebar_html(page, f"channel_sidebar_{channel_id}")
+            await page.goto(channel_url, timeout=30000)
+            await asyncio.sleep(4) # Let URL load finish
+
+        # --- STEP 4: Message Area Activity (New) ---
+        try:
+            log(f"   👀 Focusing message area...")
+            # Target the chat message area scroller
+            msg_scroller = page.locator('main[class*="chatContent"] [class*="scrollerBase"], [aria-label*="Messages"] [class*="scrollerBase"]').first
+            if await msg_scroller.count() > 0:
+                await msg_scroller.hover()
+                await asyncio.sleep(random.uniform(0.5, 1.0))
+                
+                # Perform a human-like "reading" scroll
+                scroll_amount = random.randint(2, 4)
+                log(f"   📜 Skimming {scroll_amount} message chunks...")
+                for _ in range(scroll_amount):
+                    direction = -200 if random.random() < 0.3 else 300 # Mostly down, occasionally up
+                    await msg_scroller.evaluate(f"el => el.scrollBy(0, {direction})")
+                    await asyncio.sleep(random.uniform(0.8, 1.5))
+                
+                # Scroll to bottom to ensure latest stuff is loaded
+                await msg_scroller.evaluate("el => el.scrollTo(0, el.scrollHeight)")
+                await asyncio.sleep(1.0)
+        except: pass
+
+        # --- FINAL VERIFICATION ---
+        current_url = page.url
+        match = current_url.endswith(channel_id) or f"/{channel_id}" in current_url
+        log(f"   👁️ Landing Verification: {current_url} ({'Success' if match else 'Mismatch'})")
+        if not match:
+             # If it still mismatch, try one last direct goto
+             log(f"   ⚠️ Landing mismatch. Forcing direct navigation...")
+             await page.goto(channel_url, timeout=30000)
+             await asyncio.sleep(3)
+            
+    except Exception as e:
+        log(f"   ⚠️ Navigation error: {e}")
+        await page.goto(channel_url, timeout=30000)
+
+async def save_sidebar_html(page, name_prefix):
+    """Save sidebar HTML for DOM inspection when clicking fails"""
+    try:
+        os.makedirs("data/dom_inspection", exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # 1. Try to get server list (THE FAR LEFT ICON COLUMN)
+        try:
+            server_list = await page.locator('nav[aria-label*="Servers"], [class*="guilds"]').first.inner_html()
+            with open(f"data/dom_inspection/{name_prefix}_servers_{timestamp}.html", 'w', encoding='utf-8') as f:
+                f.write(f"<!-- Saved at {timestamp} -->\n")
+                f.write(server_list)
+        except: pass
+        
+        # 2. Try to get channel list (THE MIDDLE COLUMN WITH CHANNEL NAMES)
+        try:
+            # We look for the scroller that actually contains the channels
+            channel_selectors = [
+                'nav[aria-label*="channel"]:not([aria-label*="server"])', 
+                '[class*="sidebar"] nav[class*="container"]',
+                '[class*="sidebar"] [class*="scrollerBase"]',
+                '[class*="channelsList"]'
+            ]
+            for sel in channel_selectors:
+                loc = page.locator(sel).first
+                if await loc.count() > 0:
+                    html = await loc.inner_html()
+                    with open(f"data/dom_inspection/{name_prefix}_channels_{timestamp}.html", 'w', encoding='utf-8') as f:
+                        f.write(f"<!-- Saved at {timestamp} Selector: {sel} -->\n")
+                        f.write(html)
+                    break
+        except: pass
+            
+        log(f"   💾 Sidebar HTML saved to data/dom_inspection/")
+    except Exception as e:
+        log(f"   ⚠️ Could not save sidebar HTML: {e}")
+
+async def expand_collapsed_categories(page):
+    """Expand any collapsed category folders in the channel sidebar"""
+    try:
+        # 1. Broad selectors for category headers/folders
+        category_selectors = [
+            'div[class*="containerDefault"] [role="button"]', 
+            '[class*="category"] [role="button"]',
+            '[aria-expanded="false"][class*="containerDefault"]',
+            'svg[class*="icon"][class*="collapsed"]',
+            '[class*="name"] [class*="overflow"]' # Sometimes the name itself is the button
+        ]
+        
+        found_any = False
+        for selector in category_selectors:
+            try:
+                headers = page.locator(selector)
+                count = await headers.count()
+                if count > 0:
+                    for i in range(count):
+                        try:
+                            header = headers.nth(i)
+                            # Only click if it's actually collapsed (check aria-expanded if present)
+                            aria_expanded = await header.get_attribute("aria-expanded")
+                            
+                            # If it's explicitly false or we just want to be sure (no attribute)
+                            if aria_expanded == "false" or aria_expanded is None:
+                                # Ensure it's in view before clicking
+                                await header.scroll_into_view_if_needed(timeout=1000)
+                                if await header.is_visible():
+                                    await header.click()
+                                    found_any = True
+                                    await asyncio.sleep(0.2)
+                        except: continue
+                    if found_any: break
+            except: continue
+            
+        if found_any:
+            log(f"   📂 Expanded hidden categories")
+            await asyncio.sleep(0.5)
+    except Exception as e:
+        pass
 def get_realistic_user_agent():
     """Return weighted realistic user agents (favor common ones)"""
     agents_weighted = [
@@ -445,58 +800,115 @@ def get_realistic_user_agent():
     
     return random.choice(agents)
 
-def get_prioritized_channels(available_channels):
+    return random.choice(agents)
+
+# --- PERSISTENCE & SAMPLING ---
+def save_channel_metrics():
+    """Save metrics to local JSON and upload to Supabase"""
+    try:
+        local_path = os.path.join(DATA_DIR, CHANNEL_METRICS_FILE)
+        remote_path = f"{UPLOAD_FOLDER}/{CHANNEL_METRICS_FILE}"
+        
+        with open(local_path, 'w') as f:
+            json.dump(archiver_state["channel_metrics"], f)
+            
+        # Upload in background to not block
+        threading.Thread(target=supabase_utils.upload_file, args=(local_path, SUPABASE_BUCKET, remote_path)).start()
+        log("💾 Saved channel metrics to Supabase")
+    except Exception as e:
+        log(f"⚠️ Failed to save metrics: {e}")
+
+def load_channel_metrics():
+    """Load metrics from Supabase on startup"""
+    try:
+        local_path = os.path.join(DATA_DIR, CHANNEL_METRICS_FILE)
+        remote_path = f"{UPLOAD_FOLDER}/{CHANNEL_METRICS_FILE}"
+        
+        log("🔄 Downloading channel metrics from Supabase...")
+        data = supabase_utils.download_file(local_path, remote_path, SUPABASE_BUCKET)
+        
+        if data and os.path.exists(local_path):
+            with open(local_path, 'r') as f:
+                archiver_state["channel_metrics"] = json.load(f)
+            log(f"✅ Loaded metrics for {len(archiver_state['channel_metrics'])} channels")
+        else:
+            log("ℹ️ No remote metrics found. Starting fresh.")
+    except Exception as e:
+        log(f"⚠️ Failed to load metrics: {e}")
+
+def get_small_batch_channels(available_channels, batch_size=None):
     """
-    Sort channels by activity (message count) and apply weighted skipping.
-    High activity = Low skip chance (5-15%)
-    Low activity = High skip chance (60-85%)
+    Select channels using Weighted Reservoir Sampling + 1 Exploration Slot.
     """
-    prioritized = []
-    skipped = []
+    if batch_size is None:
+        batch_size = random.randint(3, 5)
     
     # Ensure metrics exist
     for url in available_channels:
         if url not in archiver_state["channel_metrics"]:
             archiver_state["channel_metrics"][url] = {'msg_count': 0, 'last_check': 0}
-            
-    # Calculate skip chances and filter
+
+    # 1. Identify "Exploration Pool" (Bottom 33% by msg count OR 0 msgs)
+    all_metrics = []
     for url in available_channels:
+        msg_count = archiver_state["channel_metrics"][url].get('msg_count', 0)
+        all_metrics.append({'url': url, 'count': msg_count})
+    
+    all_metrics.sort(key=lambda x: x['count'])
+    
+    # Define "Low Activity" threshold
+    threshold_idx = max(1, len(all_metrics) // 3)
+    low_activity_pool = [x['url'] for x in all_metrics[:threshold_idx]]
+    
+    # Ensure 0-msg channels are always in the pool
+    zero_msg_channels = [x['url'] for x in all_metrics if x['count'] == 0]
+    exploration_pool = list(set(low_activity_pool + zero_msg_channels))
+    
+    selected_channels = []
+    
+    # --- PHASE 1: EXPLORATION SLOT (1 Channel) ---
+    exploration_pick = None
+    if exploration_pool:
+        exploration_pick = random.choice(exploration_pool)
+        selected_channels.append(exploration_pick)
+        log(f"🕵️ Exploration Pick: {exploration_pick.split('/')[-1]}")
+        
+    # --- PHASE 2: WEIGHTED SELECTION (Remaining Slots) ---
+    remaining_slots = batch_size - len(selected_channels)
+    
+    weighted_candidates = []
+    for url in available_channels:
+        if url in selected_channels: continue # Skip already picked
+        
         metrics = archiver_state["channel_metrics"][url]
         msg_count = metrics.get('msg_count', 0)
         
-        # Determine Activity Tier & Skip Chance
-        if msg_count > 5:  # High Activity
-            skip_chance = random.uniform(0.05, 0.15)
-            tier = "HIGH"
-        elif msg_count > 0: # Moderate Activity
-            skip_chance = random.uniform(0.30, 0.50)
-            tier = "MID"
-        else: # Low Activity (0 messages)
-            skip_chance = random.uniform(0.60, 0.85)
-            tier = "LOW"
-            
-        # Roll the dice
-        if random.random() < skip_chance:
-            skipped.append(url)
-        else:
-            # specialized sorting score: msg_count + random noise (to shuffle equal tiers)
-            score = msg_count + random.uniform(0, 2)
-            prioritized.append({'url': url, 'score': score, 'tier': tier})
-    
-    # Sort by score descending (highest activity first)
-    prioritized.sort(key=lambda x: x['score'], reverse=True)
-    
-    final_list = [p['url'] for p in prioritized]
-    
-    # Log summary
-    log(f"📊 Channel Priority: Process {len(final_list)}/{len(available_channels)} (Skipped {len(skipped)})")
-    if prioritized:
-        top = prioritized[:3]
-        # Fixed f-string syntax (alternating quotes)
-        top_strs = [f"{p['url'].split('/')[-1]}({p['tier']})" for p in top]
-        log(f"   🔝 Top: {', '.join(top_strs)}")
+        # Calculate Weight: log(N+1) + 1
+        weight = math.log(msg_count + 1) + 1
+        score = random.random() ** (1 / weight)
         
-    return final_list
+        weighted_candidates.append({'url': url, 'score': score, 'msgs': msg_count})
+    
+    weighted_candidates.sort(key=lambda x: x['score'], reverse=True)
+    
+    # Pick top K
+    weighted_picks = weighted_candidates[:remaining_slots]
+    for c in weighted_picks:
+        selected_channels.append(c['url'])
+        
+    random.shuffle(selected_channels)
+    
+    log(f"🎲 Selected Batch ({len(selected_channels)}):")
+    for url in selected_channels:
+        m = archiver_state["channel_metrics"][url].get('msg_count', 0)
+        marker = "🕵️" if url == exploration_pick else "🔥"
+        log(f"   - {marker} {url.split('/')[-1]} (Msgs: {m})")
+        
+    return selected_channels
+
+def get_weighted_channel_order(available_channels):
+    # Legacy wrapper if needed, but we use get_small_batch_channels now
+    return get_small_batch_channels(available_channels)
 
 def get_next_check_interval():
     """Gaussian distribution for check intervals - more natural clustering"""
@@ -529,7 +941,8 @@ def track_channel_error(channel_url, error_msg, image_bytes=None):
         send_telegram_alert(f"Channel Access Failed", f"Channel: {channel_url}\nError: {error_msg}", alert_type, image_bytes=image_bytes)
 
 def track_channel_success(channel_url):
-    archiver_state["error_counts"][channel_url] = 0
+    if channel_url in archiver_state["error_counts"]:
+        del archiver_state["error_counts"][channel_url]
     archiver_state["last_success_time"][channel_url] = datetime.utcnow().isoformat()
 
 def generate_content_hash(content_dict):
@@ -799,6 +1212,10 @@ async def async_archiver_logic():
         try:
             with open(last_ids_path, 'r') as f: last_ids = json.load(f)
         except: pass
+        
+    # Load Persistent Metrics
+    load_channel_metrics()
+    last_metric_save = time.time()
 
     while not stop_event.is_set():
         try:
@@ -951,7 +1368,7 @@ async def async_archiver_logic():
                                 if wait_cycles % 10 == 0: log(f"⏳ {wait_cycles*5}s elapsed...")
 
 
-                        # Dynamic Channel Ranking & Skipping
+                        # Dynamic Channel Loading (Small Batch Strategy)
                         cm.reload() 
                         enabled_channels = cm.get_enabled_channels()
                         all_urls = [c['url'] for c in enabled_channels]
@@ -961,16 +1378,30 @@ async def async_archiver_logic():
                             await asyncio.sleep(60)
                             continue
 
-                        channels_to_check = get_prioritized_channels(all_urls)
+                        # Pick a small batch (3-5 channels)
+                        channels_to_check = get_small_batch_channels(all_urls)
                         
                         for channel_url in channels_to_check:
                             if stop_event.is_set(): break
 
+
                             # --- IDLE BREAK CHECK (Per Channel) ---
-                            # Adjusted chance since it runs more often (4% per channel)
-                            if random.random() < 0.04: 
+                            # Logic: Random (10%) OR Forced after 15 channels without break
+                            # Duration is random (IDLE_BREAK_MIN to IDLE_BREAK_MAX) handled by take_idle_break
+                            
+                            should_break = False
+                            archiver_state["checks_since_idle"] += 1
+                            
+                            if archiver_state["checks_since_idle"] >= 15:
+                                log("⚠️ Forced idle break (15 channels limit reached)")
+                                should_break = True
+                            elif random.random() < 0.10:
+                                should_break = True
+                                
+                            if should_break: 
                                 await take_idle_break()
-                                # Re-check stop event after break
+                                archiver_state["last_alert_time"]["last_idle_break"] = time.time()
+                                archiver_state["checks_since_idle"] = 0 # Reset counter
                                 if stop_event.is_set(): break
                             
                             # Persistent failure check
@@ -985,7 +1416,8 @@ async def async_archiver_logic():
                             log(f"📂 [{archiver_state['total_checks']}] {channel_url.split('/')[-1]}")
                             
                             try:
-                                await page.goto(channel_url, timeout=30000)
+                                # Always use click navigation (fallback to URL only if click fails)
+                                await navigate_to_channel(page, channel_url)
                                 await smart_delay(2, 5)
                                 
                                 # Human behavior simulation
@@ -1110,9 +1542,22 @@ async def async_archiver_logic():
                                 track_channel_error(channel_url, f"{str(e)}\nURL: {page_url}\nTitle: {page_title}\n\nTraceback:\n{tb}", image_bytes=err_screenshot)
                                 await smart_delay(4, 8)
 
-                        # Randomized next check interval
+                        
+                        # Save metrics periodically
+                        if time.time() - last_metric_save > 600: # Every 10 mins
+                            save_channel_metrics()
+                            last_metric_save = time.time()
+
+                        # --- LONG SLEEP CHECK (Post Batch) ---
+                        if random.random() < LONG_SLEEP_CHANCE:
+                            await take_long_sleep()
+                            if stop_event.is_set(): break
+
+                        # Randomized "Session Delay" between batches
+                        # Mimics a user checking a few channels, then doing something else
                         next_check = get_next_check_interval()
-                        log(f"💤 Next: {int(next_check)}s (Stats: {archiver_state['total_checks']} checks, {archiver_state['mouse_movements']} moves, {archiver_state['scrolls_performed']} scrolls)")
+                        archiver_state["idle_breaks_taken"] += 1
+                        log(f"💤 Batch Complete. Taking session break ({int(next_check)}s)...")
                         
                         for _ in range(int(next_check)):
                             if stop_event.is_set(): break
