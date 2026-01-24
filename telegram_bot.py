@@ -602,6 +602,10 @@ class SubscriptionManager:
         self.local_codes_path = f"data/{CODES_FILE}"
         self.local_potential_path = f"data/{POTENTIAL_USERS_FILE}"
         
+        # Persistence & Sync
+        self.last_sync_time = 0
+        self.sync_interval = 60 # Sync every 60s
+        
         # Stripe Config
         self.stripe_price_id_monthly = os.getenv("STRIPE_PRICE_ID_MONTHLY")
         self.stripe_price_id_yearly = os.getenv("STRIPE_PRICE_ID_YEARLY")
@@ -609,6 +613,16 @@ class SubscriptionManager:
         
         os.makedirs("data", exist_ok=True)
         self._load_state()
+
+    def reload(self, force=False):
+        """Reload user state from Supabase if stale or forced"""
+        now = time.time()
+        if not force and (now - self.last_sync_time) < self.sync_interval:
+            return
+            
+        logger.info("🔄 Reloading user state from Supabase...")
+        self._load_state()
+        self.last_sync_time = now
 
     def _load_state(self):
         """Load state from Supabase with local fallback"""
@@ -890,6 +904,7 @@ Use /start to see your updated status.
                             break
 
     def get_active_users(self) -> List[str]:
+        self.reload()
         active = []
         now = datetime.utcnow()
         with self.lock:
@@ -932,6 +947,7 @@ Use /start to see your updated status.
         return self.users.get(str(user_id), {}).get("expiry")
     
     def is_active(self, user_id: str) -> bool:
+        self.reload()
         expiry = self.get_expiry(str(user_id))
         if not expiry: return False
         try:
