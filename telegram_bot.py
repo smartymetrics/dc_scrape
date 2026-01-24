@@ -847,10 +847,10 @@ class SubscriptionManager:
                     success_msg = f"""
 🎉 <b>Welcome to Hollowscan Premium!</b>
 
-Your payment was successful and your subscription is now <b>Active</b> for the next {days_to_add - 2} days.
+Your payment was successful and your subscription is now <b>Active</b> for the next {days_to_add} days.
 
 🚀 You will now receive instant alerts. 
-Use /start to see your updated status.
+<b>Click /start to refresh your menu and see your status.</b>
 """
                     try:
                         api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
