@@ -12,7 +12,6 @@ import nest_asyncio
 import subprocess
 import hashlib
 import re
-import re
 import random
 import math
 from datetime import datetime, timedelta
@@ -39,7 +38,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID")
 
 SUPABASE_BUCKET = "monitor-data"
-UPLOAD_FOLDER = "discord_josh"
 UPLOAD_FOLDER = "discord_josh"
 STORAGE_STATE_FILE = "storage_state.json"
 LAST_MESSAGE_ID_FILE = "last_message_ids.json"
@@ -867,16 +865,24 @@ def get_small_batch_channels(available_channels, batch_size=None):
     
     # Ensure 0-msg channels are always in the pool
     zero_msg_channels = [x['url'] for x in all_metrics if x['count'] == 0]
-    exploration_pool = list(set(low_activity_pool + zero_msg_channels))
+    # Sort pool by last_check to implement a cooldown/round-robin (oldest check first)
+    exploration_pool_with_times = []
+    for url in exploration_pool:
+        last_check = archiver_state["channel_metrics"][url].get('last_check', 0)
+        exploration_pool_with_times.append({'url': url, 'last_check': last_check})
     
+    exploration_pool_with_times.sort(key=lambda x: x['last_check'])
+    exploration_pool = [x['url'] for x in exploration_pool_with_times]
+
     selected_channels = []
     
     # --- PHASE 1: EXPLORATION SLOT (1 Channel) ---
     exploration_pick = None
     if exploration_pool:
-        exploration_pick = random.choice(exploration_pool)
+        # Pick the oldest checked one from the exploration pool (Robin-Robin)
+        exploration_pick = exploration_pool[0]
         selected_channels.append(exploration_pick)
-        log(f"🕵️ Exploration Pick: {exploration_pick.split('/')[-1]}")
+        log(f"🕵️ Exploration Pick: {exploration_pick.split('/')[-1]} (Last checked: {int(time.time() - archiver_state['channel_metrics'][exploration_pick].get('last_check', 0))}s ago)")
         
     # --- PHASE 2: WEIGHTED SELECTION (Remaining Slots) ---
     remaining_slots = batch_size - len(selected_channels)
@@ -941,9 +947,14 @@ async def save_message_html_for_inspection(message_element, message_id):
 
 def track_channel_error(channel_url, error_msg, image_bytes=None):
     archiver_state["error_counts"][channel_url] = archiver_state["error_counts"].get(channel_url, 0) + 1
-    if archiver_state["error_counts"][channel_url] >= ERROR_THRESHOLD:
-        alert_type = f"channel_error_{channel_url}"
-        send_telegram_alert(f"Channel Access Failed", f"Channel: {channel_url}\nError: {error_msg}", alert_type, image_bytes=image_bytes)
+    
+    # Always notify admin of errors as requested, but keep the alert_type to allow internal cooldown if needed
+    alert_type = f"channel_error_{channel_url}"
+    send_telegram_alert(
+        f"Channel Error: {channel_url.split('/')[-1]}", 
+        f"Channel: {channel_url}\nError: {error_msg}\nTotal Failures: {archiver_state['error_counts'][channel_url]}", 
+        image_bytes=image_bytes
+    )
 
 def track_channel_success(channel_url):
     if channel_url in archiver_state["error_counts"]:
@@ -1570,6 +1581,7 @@ async def async_archiver_logic():
 
                     except Exception as e:
                         log(f"💥 Browser loop error: {str(e)[:100]}")
+                        send_telegram_alert("Browser Loop Error", f"Error: {str(e)}\nLoop continuing...")
                         if "Page crashed" in str(e) or "Target closed" in str(e) or "Browser closed" in str(e):
                             log("🔄 Critical browser failure detected. Restarting session...")
                             break # Break inner loop to re-init playwright
@@ -1583,6 +1595,7 @@ async def async_archiver_logic():
 
         except Exception as e:
             log(f"💥 Top-level error: {str(e)[:100]}")
+            send_telegram_alert("CRITICAL: Top-level Archiver Error", f"The archiver loop encountered a major error: {str(e)}\nRestarting loop in 15s...")
             await asyncio.sleep(15)
     
     log("✅ Archiver logic stopped")

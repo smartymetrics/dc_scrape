@@ -2784,7 +2784,9 @@ async def broadcast_job(context: ContextTypes.DEFAULT_TYPE):
             
         except asyncio.TimeoutError:
             elapsed = (datetime.utcnow() - job_start_time).total_seconds()
+            err_msg = f"⚠️ <b>Broadcast job TIMEOUT</b> after {elapsed:.1f}s - forcing termination"
             logger.error(f"❌ Broadcast job TIMEOUT after {elapsed:.1f}s - forcing termination")
+            await notify_admins(context, err_msg)
             
         except Exception as e:
             elapsed = (datetime.utcnow() - job_start_time).total_seconds()
@@ -2900,7 +2902,9 @@ async def _broadcast_job_inner(context: ContextTypes.DEFAULT_TYPE):
     try:
         new_msgs = poller.poll_new_messages()
     except Exception as e:
+        err_msg = f"❌ <b>Polling Failed</b>: {type(e).__name__}: {e}"
         logger.error(f"❌ Failed to poll messages: {e}")
+        await notify_admins(context, err_msg)
         return
     
     if not new_msgs:
