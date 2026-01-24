@@ -829,8 +829,20 @@ class SubscriptionManager:
                     self._sync_state()
                     logger.info(f"💰 Stripe: User {uid} subscribed via Checkout.")
                     
-                    # Notify user (we need bot instance, usually available globally or via callback)
-                    # We'll rely on the next poll/interaction for now or use a shared queue
+                    # Notify user immediately
+                    success_msg = f"""
+🎉 <b>Welcome to Hollowscan Premium!</b>
+
+Your payment was successful and your subscription is now <b>Active</b> for the next {days_to_add - 2} days.
+
+🚀 You will now receive instant alerts. 
+Use /start to see your updated status.
+"""
+                    try:
+                        api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+                        requests.post(api_url, json={"chat_id": uid, "text": success_msg, "parse_mode": "HTML"}, timeout=10)
+                    except Exception as e:
+                        logger.warning(f"Failed to send confirmation to {uid}: {e}")
         
         elif event_type == 'invoice.paid':
             # Recurring payment success
@@ -854,6 +866,13 @@ class SubscriptionManager:
                             self.users[uid]["expiry"] = new_expiry.isoformat()
                             self._sync_state()
                             logger.info(f"✅ Stripe: User {uid} subscription renewed ({days_to_add} days).")
+                            
+                            # Notify user of renewal
+                            renew_msg = f"✅ <b>Subscription Renewed!</b>\n\nYour premium access has been extended. Thank you for staying with us!"
+                            try:
+                                api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+                                requests.post(api_url, json={"chat_id": uid, "text": renew_msg, "parse_mode": "HTML"}, timeout=10)
+                            except: pass
                             break
                             
         elif event_type == 'customer.subscription.deleted':
