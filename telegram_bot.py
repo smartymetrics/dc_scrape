@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from bs4 import BeautifulSoup
 import supabase_utils
@@ -2422,7 +2423,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 welcome_text += "❌ <b>Not subscribed</b>\n\nRedeem a code or subscribe below to get started!\n"
             
-            await query.edit_message_text(welcome_text, parse_mode=ParseMode.HTML, reply_markup=create_main_menu(user_id))
+            try:
+                await query.edit_message_text(welcome_text, parse_mode=ParseMode.HTML, reply_markup=create_main_menu(user_id))
+            except BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    raise e
             return
             
         elif menu_to_go == "settings":
@@ -2453,9 +2458,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🔔 Alerts: {'⏸️ PAUSED' if stats['is_paused'] else '✅ Active'}
 """
+        text += f"\n\n<i>Last updated: {datetime.utcnow().strftime('%H:%M:%S')} UTC</i>"
         
         buttons = [[InlineKeyboardButton("🔄 Refresh", callback_data="status")]]
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=create_menu_with_back(buttons, "main"))
+        try:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=create_menu_with_back(buttons, "main"))
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise e
     
     elif action == "toggle_pause":
         if not sm.is_active(user_id):
@@ -2567,7 +2577,11 @@ Get a code from your administrator!
                 row = []
         if row: buttons.append(row)
 
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=create_menu_with_back(buttons, "settings"))
+        try:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=create_menu_with_back(buttons, "settings"))
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise e
 
     elif action == "none":
         # Decorative separator, ignore click
