@@ -834,8 +834,20 @@ class SubscriptionManager:
                     self.users[uid]["stripe_customer_id"] = customer_id
                     self.users[uid]["stripe_subscription_id"] = subscription_id
                     
-                    # Set expiry based on plan
-                    new_expiry = datetime.utcnow() + timedelta(days=days_to_add)
+                    # Set expiry based on plan (Extend if active, otherwise start fresh)
+                    current_expiry_str = self.users[uid].get("expiry")
+                    now = datetime.utcnow()
+                    base_date = now
+                    
+                    if current_expiry_str:
+                        try:
+                            current_expiry = parse_iso_datetime(current_expiry_str)
+                            if current_expiry > now:
+                                base_date = current_expiry
+                                logger.info(f"   ➕ Extending existing subscription for {uid}")
+                        except: pass
+
+                    new_expiry = base_date + timedelta(days=days_to_add)
                     self.users[uid]["expiry"] = new_expiry.isoformat()
                     
                     if uid in self.potential_users:
