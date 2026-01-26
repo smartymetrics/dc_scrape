@@ -865,6 +865,10 @@ def get_small_batch_channels(available_channels, batch_size=None):
     
     # Ensure 0-msg channels are always in the pool
     zero_msg_channels = [x['url'] for x in all_metrics if x['count'] == 0]
+    
+    # Combine and deduplicate
+    exploration_pool = list(set(low_activity_pool + zero_msg_channels))
+    
     # Sort pool by last_check to implement a cooldown/round-robin (oldest check first)
     exploration_pool_with_times = []
     for url in exploration_pool:
