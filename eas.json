@@ -2,10 +2,13 @@
   "cli": {
     "version": ">= 16.32.0"
   },
-  "projectId": "2f7823be-eb44-4956-8297-4969baf0a524",
   "build": {
     "production": {},
     "preview": {},
     "development": {}
+  },
+  "submit": {
+    "production": {}
   }
 }
+

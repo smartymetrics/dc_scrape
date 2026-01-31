@@ -1,0 +1,4 @@
+**/*
+!hollowscan_app/**
+!eas.json
+!app.json
