@@ -4,7 +4,7 @@ main_api.py
 Professional FastAPI backend for SmartyMetrics Mobile App.
 Provides endpoints for feed, categories, and subscription management.
 """
-
+ 
 from fastapi import FastAPI, HTTPException, Depends, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 import requests
