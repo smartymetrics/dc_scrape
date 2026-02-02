@@ -1,5 +1,6 @@
 import React, { useContext, useState, useEffect } from 'react';
 import { StyleSheet, View, Text, ScrollView, Image, TouchableOpacity, Linking, Share, Dimensions, StatusBar } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -11,8 +12,9 @@ const { width } = Dimensions.get('window');
 const ProductDetailScreen = ({ route, navigation }) => {
     const [product, setProduct] = React.useState(null);
     const [loading, setLoading] = React.useState(false);
+    const [copiedLabel, setCopiedLabel] = useState(null);
     const { toggleSave, isSaved } = useContext(SavedContext);
-    
+
     // Handle both direct navigation and deep link
     React.useEffect(() => {
         if (route.params?.product) {
@@ -58,10 +60,10 @@ const ProductDetailScreen = ({ route, navigation }) => {
         try {
             // Create deep link for the product
             const deepLink = `hollowscan://product/${product.id}`;
-            
+
             // Create share message with deep link
             const message = `🔥 Check out this deal from ${brand}!\n\n📦 ${data.title}\n💵 Buy: $${data.price}\n💰 Sell: $${data.resell}\n📈 Profit: $${formattedProfit} (ROI: ${roi}%)\n\nOpen in app: ${deepLink}`;
-            
+
             await Share.share({
                 message: message,
                 url: deepLink,
@@ -94,8 +96,62 @@ const ProductDetailScreen = ({ route, navigation }) => {
     const amazonLink = links.fba?.[0]?.url || `https://www.amazon.com/s?k=${encodeURIComponent(data.title)}`;
     const googleLink = `https://www.google.com/search?q=${encodeURIComponent(data.title)}`;
 
+    const copyToClipboard = async (text, label) => {
+        if (!text) return;
+        await Clipboard.setStringAsync(text);
+        setCopiedLabel(label);
+        setTimeout(() => setCopiedLabel(null), 2000);
+    };
+
+    const isCopyable = (label) => {
+        const lowerLabel = (label || '').toLowerCase();
+        return ['pid', 'sku', 'barcode', 'id', 'ean', 'upc', 'asin'].some(k => lowerLabel.includes(k));
+    };
+
+    // Helper to render price with strikethrough
+    const renderPriceValue = (value) => {
+        if (!value) return null;
+
+        // Check for discount pattern: "~~15~~ 10" or "£15 (30%) £10"
+        if (value.includes('~~')) {
+            const parts = value.split('~~');
+            // parts[0] is before, parts[1] is stuck through, parts[2] is after
+            return (
+                <Text>
+                    {parts[0]}
+                    <Text style={{ textDecorationLine: 'line-through', opacity: 0.6 }}>{parts[1]}</Text>
+                    {parts[2]}
+                </Text>
+            );
+        }
+
+        if (value.includes('(') && value.includes(')')) {
+            // Handle "£15 (30%) £10" -> "£15" (strike) "(30%) £10"
+            const match = value.match(/([£$\d.]+)\s*(\(.*\))\s*([£$\d.]+)/);
+            if (match) {
+                return (
+                    <Text>
+                        <Text style={{ textDecorationLine: 'line-through', opacity: 0.6 }}>{match[1]}</Text>
+                        <Text> {match[2]} </Text>
+                        <Text style={{ fontWeight: '900', color: '#10B981' }}>{match[3]}</Text>
+                    </Text>
+                );
+            }
+        }
+
+        return <Text>{value}</Text>;
+    };
+
+    // Filter out redundant fields that are already in the top card
+    const visibleDetails = data.details ? data.details.filter(d => !d.is_redundant) : [];
+
     return (
         <SafeAreaView style={styles.container} edges={['top']}>
+            {copiedLabel && (
+                <View style={styles.copiedToast}>
+                    <Text style={styles.copiedToastText}>Copied {copiedLabel} To Clipboard!</Text>
+                </View>
+            )}
             {/* MODERN HEADER */}
             <View style={styles.header}>
                 <TouchableOpacity
@@ -150,7 +206,9 @@ const ProductDetailScreen = ({ route, navigation }) => {
                         </LinearGradient>
                         <View style={[styles.tag, { backgroundColor: '#F0F0F0' }]}>
                             <Text style={styles.tagText}>
-                                {product.country_code === 'US' ? '🇺🇸 US' : product.country_code === 'UK' ? '🇬🇧 UK' : '🇨🇦 CA'}
+                                {product.region?.includes('UK') ? '🇬🇧 UK' :
+                                    product.region?.includes('Canada') ? '🇨🇦 CA' :
+                                        product.region?.includes('USA') ? '🇺🇸 US' : '🏷️ Deal'}
                             </Text>
                         </View>
                         <View style={[styles.tag, { backgroundColor: '#E0F2FE' }]}>
@@ -160,7 +218,7 @@ const ProductDetailScreen = ({ route, navigation }) => {
                 </View>
 
                 {/* PROFIT CALCULATOR - ENHANCED */}
-                {buyPrice > 0 && sellPrice > 0 && (
+                {buyPrice > 0 && (
                     <LinearGradient
                         colors={['#F0F7FF', '#E0F2FE']}
                         start={{ x: 0, y: 0 }}
@@ -174,29 +232,70 @@ const ProductDetailScreen = ({ route, navigation }) => {
                             <View style={styles.profitItem}>
                                 <Text style={styles.profitLabel}>BUY PRICE</Text>
                                 <Text style={[styles.profitValue, { color: '#666' }]}>
-                                    ${buyPrice.toFixed(2)}
+                                    {data.price_display ? renderPriceValue(data.price_display) : `$${buyPrice.toFixed(2)}`}
                                 </Text>
                             </View>
-                            <View style={[styles.profitItem, { borderLeftWidth: 1, borderLeftColor: 'rgba(0,0,0,0.1)', paddingLeft: 16 }]}>
-                                <Text style={styles.profitLabel}>SELL PRICE</Text>
-                                <Text style={[styles.profitValue, { color: brand.PURPLE }]}>
-                                    ${sellPrice.toFixed(2)}
-                                </Text>
-                            </View>
-                            <View style={[styles.profitItem, { borderLeftWidth: 1, borderLeftColor: 'rgba(0,0,0,0.1)', paddingLeft: 16 }]}>
-                                <Text style={styles.profitLabel}>NET PROFIT</Text>
-                                <Text style={[styles.profitValue, { color: profitColor, fontWeight: '900' }]}>
-                                    ${formattedProfit}
-                                </Text>
-                            </View>
-                            <View style={[styles.profitItem, { borderLeftWidth: 1, borderLeftColor: 'rgba(0,0,0,0.1)', paddingLeft: 16 }]}>
-                                <Text style={styles.profitLabel}>ROI %</Text>
-                                <Text style={[styles.profitValue, { color: roi > 0 ? '#10B981' : '#EF4444', fontWeight: '900' }]}>
-                                    {roi}%
-                                </Text>
-                            </View>
+                            {sellPrice > 0 && (
+                                <>
+                                    <View style={[styles.profitItem, { borderLeftWidth: 1, borderLeftColor: 'rgba(0,0,0,0.1)', paddingLeft: 16 }]}>
+                                        <Text style={styles.profitLabel}>SELL PRICE</Text>
+                                        <Text style={[styles.profitValue, { color: brand.PURPLE }]}>
+                                            ${sellPrice.toFixed(2)}
+                                        </Text>
+                                    </View>
+                                    <View style={[styles.profitItem, { borderLeftWidth: 1, borderLeftColor: 'rgba(0,0,0,0.1)', paddingLeft: 16 }]}>
+                                        <Text style={styles.profitLabel}>NET PROFIT</Text>
+                                        <Text style={[styles.profitValue, { color: profitColor, fontWeight: '900' }]}>
+                                            ${formattedProfit}
+                                        </Text>
+                                    </View>
+                                    <View style={[styles.profitItem, { borderLeftWidth: 1, borderLeftColor: 'rgba(0,0,0,0.1)', paddingLeft: 16 }]}>
+                                        <Text style={styles.profitLabel}>ROI %</Text>
+                                        <Text style={[styles.profitValue, { color: roi > 0 ? '#10B981' : '#EF4444', fontWeight: '900' }]}>
+                                            {roi}%
+                                        </Text>
+                                    </View>
+                                </>
+                            )}
                         </View>
                     </LinearGradient>
+                )}
+
+                {/* DESCRIPTION SECTION */}
+                {data.description ? (
+                    <View style={styles.section}>
+                        <Text style={[styles.sectionTitle, { color: '#000' }]}>📝 Description</Text>
+                        <Text style={styles.descriptionText}>{data.description}</Text>
+                    </View>
+                ) : null}
+
+                {/* PRODUCT DETAILS (FIELDS) */}
+                {visibleDetails.length > 0 && (
+                    <View style={styles.section}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                            <Text style={[styles.sectionTitle, { color: '#000', marginBottom: 0 }]}>📋 Product Details</Text>
+                            <Text style={{ fontSize: 11, color: '#999', fontWeight: '600' }}>Tap Item to Copy</Text>
+                        </View>
+                        <View style={styles.detailsContainer}>
+                            {visibleDetails.map((detail, idx) => {
+                                const copyable = isCopyable(detail.label);
+                                return (
+                                    <TouchableOpacity
+                                        key={idx}
+                                        activeOpacity={copyable ? 0.6 : 1}
+                                        onPress={() => copyable && copyToClipboard(detail.value, detail.label)}
+                                        style={[styles.detailRow, idx === visibleDetails.length - 1 && { borderBottomWidth: 0 }]}
+                                    >
+                                        <Text style={styles.detailLabel}>{detail.label}</Text>
+                                        <View style={{ flex: 1, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' }}>
+                                            <Text style={styles.detailValue}>{detail.value}</Text>
+                                            {copyable && <Text style={{ marginLeft: 6, fontSize: 12, opacity: 0.3 }}>📋</Text>}
+                                        </View>
+                                    </TouchableOpacity>
+                                );
+                            })}
+                        </View>
+                    </View>
                 )}
 
                 {/* RESEARCH LINKS SECTION */}
@@ -481,6 +580,25 @@ const styles = StyleSheet.create({
     },
     linkText: { fontSize: 14, fontWeight: '600', color: '#000', flex: 1 },
 
+    descriptionText: { fontSize: 14, color: '#4B5563', lineHeight: 22, fontWeight: '500' },
+
+    detailsContainer: {
+        backgroundColor: '#F9FAFB',
+        borderRadius: 16,
+        padding: 4,
+        borderWidth: 1,
+        borderColor: '#E5E7EB'
+    },
+    detailRow: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        padding: 12,
+        borderBottomWidth: 1,
+        borderBottomColor: '#F3F4F6'
+    },
+    detailLabel: { fontSize: 13, color: '#6B7280', fontWeight: '700', textTransform: 'uppercase' },
+    detailValue: { fontSize: 13, color: '#111827', fontWeight: '600', flex: 1, textAlign: 'right', marginLeft: 10 },
+
     buyRow: {
         flexDirection: 'row',
         justifyContent: 'space-between',
@@ -547,7 +665,24 @@ const styles = StyleSheet.create({
         shadowRadius: 6,
         elevation: 3
     },
-    viewSourceText: { fontWeight: '900', fontSize: 14, color: '#FFF', letterSpacing: 0.3 }
+    viewSourceText: { fontWeight: '900', fontSize: 14, color: '#FFF', letterSpacing: 0.3 },
+    copiedToast: {
+        position: 'absolute',
+        top: 60,
+        left: 20,
+        right: 20,
+        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+        padding: 12,
+        borderRadius: 12,
+        zIndex: 1000,
+        alignItems: 'center',
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.3,
+        shadowRadius: 8,
+        elevation: 10
+    },
+    copiedToastText: { color: '#FFF', fontWeight: 'bold' }
 });
 
 export default ProductDetailScreen;

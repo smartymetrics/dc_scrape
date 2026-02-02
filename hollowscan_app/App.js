@@ -7,6 +7,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import * as Linking from 'expo-linking';
 import { SavedProvider } from './context/SavedContext';
+import { UserProvider } from './context/UserContext';
 import Constants from './Constants';
 
 // Screens
@@ -92,20 +93,22 @@ export default function App() {
   };
 
   return (
-    <SavedProvider>
-      <SafeAreaProvider>
-        {showSplash ? (
-          <SplashScreen onComplete={() => setShowSplash(false)} />
-        ) : (
-          <NavigationContainer linking={linking} fallback={<SplashScreen onComplete={() => {}} />}>
-            <StatusBar style="dark" />
-            <Stack.Navigator screenOptions={{ headerShown: false }}>
-              <Stack.Screen name="Root" component={TabNavigator} />
-              <Stack.Screen name="ProductDetail" component={ProductDetailScreen} options={{ presentation: 'card' }} />
-            </Stack.Navigator>
-          </NavigationContainer>
-        )}
-      </SafeAreaProvider>
-    </SavedProvider>
+    <UserProvider>
+      <SavedProvider>
+        <SafeAreaProvider>
+          {showSplash ? (
+            <SplashScreen onComplete={() => setShowSplash(false)} />
+          ) : (
+            <NavigationContainer linking={linking} fallback={<SplashScreen onComplete={() => { }} />}>
+              <StatusBar style="dark" />
+              <Stack.Navigator screenOptions={{ headerShown: false }}>
+                <Stack.Screen name="Root" component={TabNavigator} />
+                <Stack.Screen name="ProductDetail" component={ProductDetailScreen} options={{ presentation: 'card' }} />
+              </Stack.Navigator>
+            </NavigationContainer>
+          )}
+        </SafeAreaProvider>
+      </SavedProvider>
+    </UserProvider>
   );
 }

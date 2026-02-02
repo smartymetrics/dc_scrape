@@ -1,0 +1,20 @@
+﻿--- Loading local channels_.json ---
+Loaded 84 channels from local file.
+
+--- Fetching latest 100 messages from Supabase ---
+Fetched 100 messages.
+
+--- Channel Stats in last 100 messages ---
+Canada Stores | Amazon: 5 messages
+Canada Stores | Eb-Games: 10 messages
+Canada Stores | Walmart: 6 messages
+UK Stores | Amazon Pokemon: 2 messages
+UK Stores | Argos Instore: 10 messages
+UK Stores | Collectors Amazon: 10 messages
+UK Stores | Price Drop Argos: 12 messages
+UK Stores | Price Drop Currys: 10 messages
+UK Stores | Smyths Toys Instore: 2 messages
+USA Stores | Amazon: 10 messages
+USA Stores | Hot Topic: 3 messages
+USA Stores | Pop Mart: 11 messages
+USA Stores | sports aio all: 9 messages

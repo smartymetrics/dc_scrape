@@ -8,11 +8,11 @@ const AlertsScreen = () => {
 
     // State
     const [isEnabled, setIsEnabled] = useState(true);
-    const [categories, setCategories] = useState({ US: [], UK: [], CA: [] });
+    const [categories, setCategories] = useState({ 'USA Stores': [], 'UK Stores': [], 'Canada Stores': [] });
     const [loading, setLoading] = useState(true);
 
     // Preferences State (Mocked per session for now)
-    const [selectedCountries, setSelectedCountries] = useState({ US: true, UK: false, CA: false });
+    const [selectedCountries, setSelectedCountries] = useState({ 'USA Stores': true, 'UK Stores': false, 'Canada Stores': false });
     const [selectedSubs, setSelectedSubs] = useState({});
 
     useEffect(() => {
@@ -23,13 +23,16 @@ const AlertsScreen = () => {
         try {
             const response = await fetch(`${Constants.API_BASE_URL}/v1/categories`);
             const data = await response.json();
-            setCategories(data || { US: [], UK: [], CA: [] });
+            const cats = data.categories || {};
+            setCategories(cats);
 
             // Initialize all subs as enabled for selected countries
             const initialSubs = {};
-            Object.keys(data).forEach(country => {
-                data[country].forEach(sub => {
-                    initialSubs[sub] = true;
+            Object.keys(cats).forEach(country => {
+                cats[country].forEach(sub => {
+                    if (sub !== 'ALL') {
+                        initialSubs[sub] = true;
+                    }
                 });
             });
             setSelectedSubs(initialSubs);
@@ -101,15 +104,15 @@ const AlertsScreen = () => {
                             <Text style={styles.sectionTitle}>Regions</Text>
                             <View style={styles.row}>
                                 <Text style={styles.label}>🇺🇸 United States</Text>
-                                <Switch value={selectedCountries.US} onValueChange={() => toggleCountry('US')} trackColor={{ true: brand.BLUE }} />
+                                <Switch value={selectedCountries['USA Stores']} onValueChange={() => toggleCountry('USA Stores')} trackColor={{ true: brand.BLUE }} />
                             </View>
                             <View style={styles.row}>
                                 <Text style={styles.label}>🇬🇧 United Kingdom</Text>
-                                <Switch value={selectedCountries.UK} onValueChange={() => toggleCountry('UK')} trackColor={{ true: brand.BLUE }} />
+                                <Switch value={selectedCountries['UK Stores']} onValueChange={() => toggleCountry('UK Stores')} trackColor={{ true: brand.BLUE }} />
                             </View>
                             <View style={styles.row}>
                                 <Text style={styles.label}>🇨🇦 Canada</Text>
-                                <Switch value={selectedCountries.CA} onValueChange={() => toggleCountry('CA')} trackColor={{ true: brand.BLUE }} />
+                                <Switch value={selectedCountries['Canada Stores']} onValueChange={() => toggleCountry('Canada Stores')} trackColor={{ true: brand.BLUE }} />
                             </View>
                         </View>
 
@@ -118,9 +121,9 @@ const AlertsScreen = () => {
                             <ActivityIndicator color={brand.BLUE} style={{ marginTop: 20 }} />
                         ) : (
                             <>
-                                {renderSubcategorySection('US', 'United States', '🇺🇸')}
-                                {renderSubcategorySection('UK', 'United Kingdom', '🇬🇧')}
-                                {renderSubcategorySection('CA', 'Canada', '🇨🇦')}
+                                {renderSubcategorySection('USA Stores', 'United States', '🇺🇸')}
+                                {renderSubcategorySection('UK Stores', 'United Kingdom', '🇬🇧')}
+                                {renderSubcategorySection('Canada Stores', 'Canada', '🇨🇦')}
                             </>
                         )}
                     </>

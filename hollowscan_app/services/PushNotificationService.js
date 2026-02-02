@@ -48,10 +48,10 @@ export const setupNotificationHandler = () => {
     // Listen for notifications when app is in foreground
     const notificationListener = Notifications.addNotificationReceivedListener(notification => {
         console.log('[NOTIFICATIONS] Notification received:', notification);
-        
+
         // Handle notification data if needed
         const data = notification.request.content.data;
-        if (data.product_id) {
+        if (data && data.product_id) {
             // Could navigate to product, show alert, etc.
         }
     });
@@ -60,9 +60,9 @@ export const setupNotificationHandler = () => {
     const responseListener = Notifications.addNotificationResponseReceivedListener(response => {
         console.log('[NOTIFICATIONS] User tapped notification');
         const data = response.notification.request.content.data;
-        
+
         // Navigate or handle the tap
-        if (data.product_id) {
+        if (data && data.product_id) {
             console.log('[NOTIFICATIONS] Opening product:', data.product_id);
         }
     });

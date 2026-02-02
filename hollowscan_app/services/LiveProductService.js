@@ -12,6 +12,7 @@ class LiveProductService {
         this.listeners = [];
         this.lastProductTime = new Date();
         this.isPolling = false;
+        this.LIMIT = 10;
     }
 
     /**
@@ -22,7 +23,7 @@ class LiveProductService {
     subscribe(callback) {
         this.listeners.push(callback);
         console.log('[LIVE] Subscriber added. Total subscribers:', this.listeners.length);
-        
+
         // Return unsubscribe function
         return () => {
             this.listeners = this.listeners.filter(cb => cb !== callback);
@@ -87,12 +88,17 @@ class LiveProductService {
                 country,
                 category,
                 onlyNew = true,
+                search = ''
             } = params;
 
             // Build query to get only products created after lastProductTime
             const catParam = category === 'ALL' || !category ? '' : category;
-            const limitParam = onlyNew ? 5 : 20; // Get top 5 new products only
-            const url = `${Constants.API_BASE_URL}/v1/feed?user_id=${userId}&country=${country}&category=${encodeURIComponent(catParam)}&offset=0&limit=${limitParam}`;
+            const limitParam = onlyNew ? this.LIMIT : 20;
+            let url = `${Constants.API_BASE_URL}/v1/feed?user_id=${userId}&region=${encodeURIComponent(country)}&category=${encodeURIComponent(catParam)}&offset=0&limit=${limitParam}`;
+
+            if (search && search.trim()) {
+                url += `&search=${encodeURIComponent(search.trim())}`;
+            }
 
             const response = await fetch(url, {
                 timeout: 5000, // 5 second timeout
@@ -100,11 +106,13 @@ class LiveProductService {
 
             if (!response.ok) return;
 
-            const data = await response.json();
-            if (!Array.isArray(data) || data.length === 0) return;
+            const result = await response.json();
+            const productsList = Array.isArray(result) ? result : (result.products || []);
+
+            if (productsList.length === 0) return;
 
             // Filter for products newer than our last known time
-            const newProducts = data.filter(product => {
+            const newProducts = productsList.filter(product => {
                 const productTime = new Date(product.product_data?.created_at || product.created_at || new Date());
                 return productTime > this.lastProductTime;
             });
@@ -112,7 +120,7 @@ class LiveProductService {
             if (newProducts.length > 0) {
                 console.log('[LIVE] Found', newProducts.length, 'new products');
                 this.lastProductTime = new Date(); // Update last known time
-                
+
                 // Notify subscribers with NEW products at the top
                 this.notifySubscribers(newProducts);
             }

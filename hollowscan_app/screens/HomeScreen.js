@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useContext } from 'react';
+import React, { useState, useEffect, useCallback, useContext, useRef } from 'react';
 import {
     StyleSheet,
     View,
@@ -59,6 +59,7 @@ const HomeScreen = ({ isDarkMode }) => {
     const [selectedSub, setSelectedSub] = useState('ALL');
     const [selectedCategories, setSelectedCategories] = useState(['ALL']); // Multiple selection
     const [searchQuery, setSearchQuery] = useState('');
+    const [isSearching, setIsSearching] = useState(false);
     const [isFilterVisible, setFilterVisible] = useState(false);
 
     const [dynamicCategories, setDynamicCategories] = useState({});
@@ -70,6 +71,8 @@ const HomeScreen = ({ isDarkMode }) => {
     const [isLoadingMore, setIsLoadingMore] = useState(false);
     const [offset, setOffset] = useState(0);
     const [hasMore, setHasMore] = useState(true);
+    const [isPremium, setIsPremium] = useState(false);
+    const [totalAvailable, setTotalAvailable] = useState(0);
 
     // BRAND
     const brand = Constants.BRAND;
@@ -100,10 +103,25 @@ const HomeScreen = ({ isDarkMode }) => {
         fetchInitialData();
     }, [selectedRegion, selectedCategories]);
 
+    const isFirstRender = useRef(true);
+
+    // HANDLERS
+    const handleSearch = async (query = searchQuery) => {
+        if (!query || !query.trim()) return;
+        setIsSearching(true);
+        await fetchAlerts(0, true, query);
+        setIsSearching(false);
+    };
+
+    const clearSearch = () => {
+        setSearchQuery('');
+        fetchAlerts(0, true, '');
+    };
+
     // SETUP NOTIFICATIONS & LIVE UPDATES
     useEffect(() => {
         console.log('[HOME] Setting up notifications and live updates');
-        
+
         // Setup notification handler
         setupNotificationHandler();
 
@@ -116,14 +134,25 @@ const HomeScreen = ({ isDarkMode }) => {
             country: selectedRegion,
             category: selectedCategories.includes('ALL') ? 'ALL' : selectedCategories[0],
             onlyNew: true,
+            search: searchQuery,
         });
 
         // Subscribe to new products
         const unsubscribe = LiveProductService.subscribe((newProducts) => {
             console.log('[HOME] Received', newProducts.length, 'new products');
-            
+
             // Add new products to the TOP of the list
-            setAlerts(prev => [...newProducts, ...prev]);
+            setAlerts(prev => {
+                const existingIds = new Set(prev.map(a => a.id));
+                const uniqueNew = newProducts.filter(p => !existingIds.has(p.id));
+                const combined = [...uniqueNew, ...prev];
+
+                // If not premium, strictly enforce 4 items limit in feed
+                if (!isPremium) {
+                    return combined.slice(0, 4);
+                }
+                return combined;
+            });
 
             // Send notification for each new product
             newProducts.forEach(product => {
@@ -137,7 +166,7 @@ const HomeScreen = ({ isDarkMode }) => {
             unsubscribe();
             LiveProductService.stopPolling();
         };
-    }, [selectedRegion, selectedCategories]);
+    }, [selectedRegion, selectedCategories, searchQuery]);
 
     const fetchInitialData = async () => {
         setIsLoading(true);
@@ -158,15 +187,16 @@ const HomeScreen = ({ isDarkMode }) => {
             const response = await fetch(`${Constants.API_BASE_URL}/v1/categories`);
             const data = await response.json();
             console.log('[CATEGORIES] Fetched data:', data);
-            // New format: {US: [...], UK: [...], CA: [...]}
-            setDynamicCategories(data || {});
-        } catch (e) { 
+
+            // API returns { "categories": { "USA Stores": [...], "UK Stores": [...], "Canada Stores": [...] } }
+            setDynamicCategories(data.categories || {});
+        } catch (e) {
             console.log("Cat Err:", e);
             // Set some defaults if fetch fails
             setDynamicCategories({
-                US: [],
-                UK: [],
-                CA: []
+                'USA Stores': [],
+                'UK Stores': [],
+                'Canada Stores': []
             });
         }
     };
@@ -176,43 +206,82 @@ const HomeScreen = ({ isDarkMode }) => {
             const response = await fetch(`${Constants.API_BASE_URL}/v1/user/status?user_id=${USER_ID}`);
             const data = await response.json();
             setQuota({ used: data.views_used, limit: data.views_limit });
+            if (data.is_premium !== undefined) setIsPremium(data.is_premium);
         } catch (e) { console.log("Quota Err:", e); }
     };
 
-    const fetchAlerts = async (currentOffset, reset = false) => {
+    const fetchAlerts = async (currentOffset, reset = false, overrideSearch = null) => {
         try {
+            const activeSearch = overrideSearch !== null ? overrideSearch : searchQuery;
             // If 'ALL' is selected, send empty string; otherwise send first selected category
             const catParam = selectedCategories.includes('ALL') ? 'ALL' : selectedCategories[0] || 'ALL';
-            const url = `${Constants.API_BASE_URL}/v1/feed?user_id=${USER_ID}&region=${encodeURIComponent(selectedRegion)}&category=${encodeURIComponent(catParam)}&offset=${currentOffset}&limit=${LIMIT}`;
+            let url = `${Constants.API_BASE_URL}/v1/feed?user_id=${USER_ID}&region=${encodeURIComponent(selectedRegion)}&category=${encodeURIComponent(catParam)}&offset=${currentOffset}&limit=${LIMIT}`;
 
-            console.log('[FETCH] Sending request to:', url);
-            console.log('[FETCH] Selected region:', selectedRegion);
-            console.log('[FETCH] Selected categories:', selectedCategories);
-            
+            if (activeSearch && activeSearch.trim()) {
+                url += `&search=${encodeURIComponent(activeSearch.trim())}`;
+            }
+
+            console.log('[FETCH] Offset:', currentOffset, 'Limit:', LIMIT, 'Reset:', reset);
+
             const response = await fetch(url);
-            const data = await response.json();
+            if (!response.ok) throw new Error('Fetch failed');
 
-            console.log('[FETCH] Response data count:', Array.isArray(data) ? data.length : 'Not array');
+            const result = await response.json();
+            // Support both array response and new object response { products, next_offset }
+            const data = Array.isArray(result) ? result : (result.products || []);
+            const nextOffset = result.next_offset !== undefined ? result.next_offset : (currentOffset + LIMIT);
 
-            if (Array.isArray(data)) {
+            // New metadata for paywall
+            if (result.is_premium !== undefined) setIsPremium(result.is_premium);
+            if (result.total_count !== undefined) setTotalAvailable(result.total_count);
+
+            console.log('[FETCH] Received items:', data.length, 'Next Offset:', nextOffset);
+
+            if (data.length >= 0) {
                 if (reset) {
                     setAlerts(data);
+                    setOffset(0);
                 } else {
-                    setAlerts(prev => [...prev, ...data]);
+                    // Filter out duplicates in case they were prepended by live service
+                    setAlerts(prev => {
+                        const existingIds = new Set(prev.map(a => a.id));
+                        const newItems = data.filter(item => !existingIds.has(item.id));
+                        return [...prev, ...newItems];
+                    });
                 }
-                setHasMore(data.length === LIMIT);
+
+                // Update the current offset from the API response
+                setOffset(nextOffset);
+
+                // If the API says there's more or we got at least one item, keep going
+                // (More robust: if we got exactly 0, and nextOffset > offset, we might still have more)
+                setHasMore(data.length === LIMIT || (result.has_more !== undefined ? result.has_more : data.length > 0));
+            } else {
+                setHasMore(false);
             }
         } catch (e) {
             console.log("Alert Fetch Err:", e);
+            setHasMore(false);
         }
     };
 
     const handleLoadMore = () => {
-        if (!hasMore || isLoadingMore || isLoading) return;
+        if (!hasMore || isLoadingMore || isLoading || alerts.length === 0) {
+            return;
+        }
+
+        // Strictly stop loading more for free users at 4 items
+        if (!isPremium && alerts.length >= 4) {
+            console.log('[HOME] Free user reached limit, blocking fetch');
+            return;
+        }
+
+        console.log('[HOME] handleLoadMore triggered. Current offset:', offset);
         setIsLoadingMore(true);
-        const nextOffset = offset + LIMIT;
-        setOffset(nextOffset);
-        fetchAlerts(nextOffset).then(() => setIsLoadingMore(false));
+
+        fetchAlerts(offset, false, searchQuery).then(() => {
+            setIsLoadingMore(false);
+        }).catch(() => setIsLoadingMore(false));
     };
 
     const onRefresh = async () => {
@@ -240,8 +309,13 @@ const HomeScreen = ({ isDarkMode }) => {
         if (!item) return null;
         const data = item.product_data || {};
         const catName = (item.category_name || "PROMO").toUpperCase();
-        const hasResell = data.resell && data.resell !== '0';
-        const hasRoi = data.roi && data.roi !== '0';
+
+        // Robust numeric validation for Resale and ROI to avoid $NaN
+        const resaleVal = parseFloat(String(data.resell || '0').replace(/[^0-9.]/g, ''));
+        const priceVal = parseFloat(String(data.price || '0').replace(/[^0-9.]/g, ''));
+
+        const hasResell = !isNaN(resaleVal) && resaleVal > 0;
+        const hasRoi = data.roi && data.roi !== '0' && !isNaN(parseFloat(data.roi));
         const saved = isSaved(item.id);
 
         return (
@@ -309,7 +383,7 @@ const HomeScreen = ({ isDarkMode }) => {
                         <View style={styles.priceBlock}>
                             <Text style={[styles.priceLabel, { color: colors.textSecondary }]}>RETAIL</Text>
                             <Text style={[styles.priceValue, { color: colors.text }]}>
-                                ${data.price || '0'}
+                                ${priceVal || '0'}
                             </Text>
                         </View>
 
@@ -319,17 +393,17 @@ const HomeScreen = ({ isDarkMode }) => {
                                 <View style={styles.priceBlock}>
                                     <Text style={[styles.priceLabel, { color: colors.textSecondary }]}>RESALE</Text>
                                     <Text style={[styles.priceValue, { color: brand.PURPLE, fontWeight: '900' }]}>
-                                        ${data.resell}
+                                        ${resaleVal}
                                     </Text>
                                 </View>
 
-                                {hasResell && data.price && (
+                                {hasResell && priceVal > 0 && (
                                     <>
                                         <View style={[styles.priceDivider, { backgroundColor: colors.border }]} />
                                         <View style={styles.priceBlock}>
                                             <Text style={[styles.priceLabel, { color: colors.textSecondary }]}>PROFIT</Text>
                                             <Text style={[styles.priceValue, { color: '#10B981', fontWeight: '900' }]}>
-                                                ${Math.round(data.resell - data.price)}
+                                                ${Math.round(resaleVal - priceVal)}
                                             </Text>
                                         </View>
                                     </>
@@ -370,9 +444,9 @@ const HomeScreen = ({ isDarkMode }) => {
         );
     };
 
-    const Header = () => (
+    // MEMOIZED HEADER TO PREVENT FOCUS LOSS
+    const listHeader = React.useMemo(() => (
         <View style={styles.header}>
-            {/* GRADIENT BACKGROUND */}
             {isDarkMode ? (
                 <View style={styles.gradientBg} />
             ) : (
@@ -384,7 +458,6 @@ const HomeScreen = ({ isDarkMode }) => {
                 />
             )}
 
-            {/* TOP BAR WITH ENHANCED STYLING */}
             <View style={styles.topBar}>
                 <View style={styles.logoAndTitle}>
                     <LinearGradient
@@ -412,24 +485,57 @@ const HomeScreen = ({ isDarkMode }) => {
                 </LinearGradient>
             </View>
 
-            {/* ENHANCED SEARCH */}
             <LinearGradient
                 colors={isDarkMode ? ['#1C1C1E', '#2A2A2E'] : ['#FFFFFF', '#F5F7FF']}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 1 }}
-                style={[styles.searchContainer, { borderColor: colors.border }]}
+                style={[styles.searchContainer, { borderColor: isSearching ? brand.PURPLE : colors.border }]}
             >
-                <Text style={{ fontSize: 16, color: colors.textSecondary, marginRight: 10 }}>🔍</Text>
+                {isSearching ? (
+                    <ActivityIndicator size="small" color={brand.PURPLE} style={{ marginRight: 10 }} />
+                ) : (
+                    <Text style={{ fontSize: 16, color: colors.textSecondary, marginRight: 10 }}>🔍</Text>
+                )}
                 <TextInput
                     placeholder="Search products..."
                     placeholderTextColor={colors.textSecondary}
                     style={[styles.searchInput, { color: colors.text }]}
                     value={searchQuery}
                     onChangeText={setSearchQuery}
+                    onSubmitEditing={() => handleSearch()}
+                    returnKeyType="search"
                 />
+                {searchQuery.trim() !== '' && !isSearching && (
+                    <TouchableOpacity onPress={clearSearch} style={{ padding: 5 }}>
+                        <Text style={{ fontSize: 14, color: colors.textSecondary }}>✕</Text>
+                    </TouchableOpacity>
+                )}
+                {!isSearching && (
+                    <TouchableOpacity
+                        onPress={() => handleSearch()}
+                        disabled={!searchQuery.trim()}
+                        style={{ marginLeft: 10, opacity: searchQuery.trim() ? 1 : 0.4 }}
+                    >
+                        <Text style={{ fontSize: 14, color: brand.BLUE, fontWeight: '700' }}>Search</Text>
+                    </TouchableOpacity>
+                )}
             </LinearGradient>
 
-            {/* REGION TABS WITH ENHANCED DESIGN */}
+            {searchQuery.trim() !== '' && (
+                <View style={styles.searchStatusRow}>
+                    <View style={[styles.searchTag, { backgroundColor: brand.PURPLE + '15' }]}>
+                        <Text style={[styles.searchTagText, { color: brand.PURPLE }]}>
+                            {isSearching ? 'Deep scanning...' : `Results for "${searchQuery}"`}
+                        </Text>
+                    </View>
+                    {!isSearching && (
+                        <Text style={[styles.searchCount, { color: colors.textSecondary }]}>
+                            {alerts.length} found
+                        </Text>
+                    )}
+                </View>
+            )}
+
             <View style={styles.regionSelectorContainer}>
                 <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>REGIONS</Text>
                 <View style={styles.regionSelector}>
@@ -460,7 +566,6 @@ const HomeScreen = ({ isDarkMode }) => {
                 </View>
             </View>
 
-            {/* CATEGORY SELECTOR ENHANCED */}
             <TouchableOpacity
                 onPress={() => setFilterVisible(true)}
                 activeOpacity={0.75}
@@ -478,15 +583,15 @@ const HomeScreen = ({ isDarkMode }) => {
                             {selectedCategories.includes('ALL')
                                 ? '📁 All Categories'
                                 : selectedCategories.length === 1
-                                ? `📍 ${selectedCategories[0]}`
-                                : `📍 ${selectedCategories.length} Selected`}
+                                    ? `📍 ${selectedCategories[0]}`
+                                    : `📍 ${selectedCategories.length} Selected`}
                         </Text>
                     </View>
                     <Text style={{ fontSize: 16, color: brand.PURPLE }}>›</Text>
                 </LinearGradient>
             </TouchableOpacity>
         </View>
-    );
+    ), [isDarkMode, searchQuery, selectedRegion, selectedCategories, quota, isSearching, alerts.length, handleSearch, clearSearch]);
 
     return (
         <SafeAreaView edges={['top']} style={[styles.container, { backgroundColor: colors.bg }]}>
@@ -494,56 +599,78 @@ const HomeScreen = ({ isDarkMode }) => {
 
             <FlatList
                 data={alerts}
-                keyExtractor={item => item?.id?.toString() || Math.random().toString()}
+                keyExtractor={item => String(item.id)}
                 renderItem={renderProductCard}
                 contentContainerStyle={styles.feedScroll}
                 showsVerticalScrollIndicator={false}
-                ListHeaderComponent={<Header />}
+                ListHeaderComponent={listHeader}
                 onRefresh={onRefresh}
                 refreshing={isRefreshing}
                 onEndReached={handleLoadMore}
-                onEndReachedThreshold={0.5}
-                ListFooterComponent={isLoadingMore ? <ActivityIndicator color={brand.BLUE} style={{ marginVertical: 20 }} /> : null}
+                onEndReachedThreshold={0.1}
+                ListFooterComponent={() => {
+                    if (isLoadingMore) return <ActivityIndicator color={brand.BLUE} style={{ marginVertical: 20 }} />;
+
+                    if (!isPremium && alerts.length >= 4) {
+                        return (
+                            <View style={styles.paywallContainer}>
+                                <LinearGradient
+                                    colors={['transparent', colors.card, colors.card]}
+                                    style={styles.paywallGradient}
+                                />
+                                <View style={[styles.paywallContent, { backgroundColor: colors.card, borderColor: colors.border }]}>
+                                    <View style={styles.paywallIcon}>
+                                        <Text style={{ fontSize: 40 }}>💎</Text>
+                                    </View>
+                                    <Text style={[styles.paywallTitle, { color: colors.text }]}>Unlock {totalAvailable}+ More Deals</Text>
+                                    <Text style={[styles.paywallDesc, { color: colors.textSecondary }]}>
+                                        You've reached your daily free limit. Subscribe to access hundreds of high-profit leads across UK, US and Canada.
+                                    </Text>
+                                    <TouchableOpacity
+                                        style={[styles.paywallBtn, { backgroundColor: brand.BLUE }]}
+                                        activeOpacity={0.8}
+                                    >
+                                        <LinearGradient
+                                            colors={[brand.BLUE, brand.PURPLE]}
+                                            start={{ x: 0, y: 0 }}
+                                            end={{ x: 1, y: 0 }}
+                                            style={styles.paywallBtnGradient}
+                                        >
+                                            <Text style={styles.paywallBtnText}>GO PREMIUM</Text>
+                                        </LinearGradient>
+                                    </TouchableOpacity>
+                                    <Text style={[styles.paywallHint, { color: colors.textSecondary }]}>
+                                        Join 500+ successful resellers today
+                                    </Text>
+                                </View>
+                            </View>
+                        );
+                    }
+                    return <View style={{ height: 40 }} />;
+                }}
                 ListEmptyComponent={!isLoading ? (
                     <View style={styles.emptyContainer}>
                         <Text style={{ color: colors.textSecondary, fontSize: 16, textAlign: 'center' }}>
-                            No live alerts found for this region.{'\n'}Try pulling to refresh.
+                            {searchQuery ? 'No products match your search.' : `No live alerts found for this region.${'\n'}Try pulling to refresh.`}
                         </Text>
                     </View>
                 ) : null}
             />
 
-            {/* ENHANCED MODAL - MULTI-SELECT */}
             <Modal visible={isFilterVisible} animationType="fade" transparent={true}>
                 <BlurView intensity={90} style={styles.modalOverlay}>
                     <View style={styles.modalCenter}>
                         <View style={[styles.modalContent, { backgroundColor: colors.card }]}>
-                            {/* MODAL HEADER */}
                             <View style={styles.modalHeader}>
                                 <Text style={[styles.modalTitle, { color: colors.text }]}>Choose Categories</Text>
-                                <TouchableOpacity
-                                    onPress={() => setFilterVisible(false)}
-                                    style={styles.closeBtn}
-                                >
+                                <TouchableOpacity onPress={() => setFilterVisible(false)} style={styles.closeBtn}>
                                     <Text style={{ fontSize: 20, color: colors.textSecondary }}>✕</Text>
                                 </TouchableOpacity>
                             </View>
-
                             <View style={[styles.modalDivider, { backgroundColor: colors.border }]} />
-
-                            {/* CATEGORY LIST */}
                             <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
-                                {/* All Categories Option */}
                                 <TouchableOpacity
-                                    onPress={() => {
-                                        if (selectedCategories.includes('ALL')) {
-                                            // If ALL is selected, just deselect it
-                                            setSelectedCategories([]);
-                                        } else {
-                                            // Selecting ALL deselects all others
-                                            setSelectedCategories(['ALL']);
-                                        }
-                                    }}
+                                    onPress={() => setSelectedCategories(['ALL'])}
                                     style={[
                                         styles.categoryOption,
                                         selectedCategories.includes('ALL') && styles.categoryOptionActive,
@@ -552,45 +679,23 @@ const HomeScreen = ({ isDarkMode }) => {
                                 >
                                     <Text style={{ fontSize: 16, marginRight: 10 }}>📁</Text>
                                     <View style={{ flex: 1 }}>
-                                        <Text style={[styles.categoryOptionText, { color: colors.text }]}>
-                                            All Categories
-                                        </Text>
-                                        <Text style={[styles.categoryOptionSub, { color: colors.textSecondary }]}>
-                                            Show all available deals
-                                        </Text>
+                                        <Text style={[styles.categoryOptionText, { color: colors.text }]}>All Categories</Text>
+                                        <Text style={[styles.categoryOptionSub, { color: colors.textSecondary }]}>Show all available deals</Text>
                                     </View>
-                                    <View
-                                        style={[
-                                            styles.checkbox,
-                                            selectedCategories.includes('ALL') && {
-                                                backgroundColor: brand.BLUE,
-                                                borderColor: brand.BLUE
-                                            }
-                                        ]}
-                                    >
-                                        {selectedCategories.includes('ALL') && (
-                                            <Text style={{ color: '#FFF', fontSize: 12, fontWeight: '900' }}>✓</Text>
-                                        )}
+                                    <View style={[styles.checkbox, selectedCategories.includes('ALL') && { backgroundColor: brand.BLUE, borderColor: brand.BLUE }]}>
+                                        {selectedCategories.includes('ALL') && <Text style={{ color: '#FFF', fontSize: 12 }}>✓</Text>}
                                     </View>
                                 </TouchableOpacity>
-
-                                {/* Individual Categories */}
                                 {currentSubcategories.filter(s => s !== 'ALL').map((sub) => (
                                     <TouchableOpacity
                                         key={sub}
                                         onPress={() => {
                                             setSelectedCategories(prev => {
-                                                // If selecting a specific category and ALL is selected, remove ALL
-                                                if (prev.includes('ALL')) {
-                                                    return [sub];
-                                                }
-                                                // If category is already selected, remove it
+                                                if (prev.includes('ALL')) return [sub];
                                                 if (prev.includes(sub)) {
                                                     const updated = prev.filter(c => c !== sub);
-                                                    // If no categories selected, select ALL
                                                     return updated.length === 0 ? ['ALL'] : updated;
                                                 }
-                                                // Otherwise add it
                                                 return [...prev, sub];
                                             });
                                         }}
@@ -602,42 +707,20 @@ const HomeScreen = ({ isDarkMode }) => {
                                     >
                                         <Text style={{ fontSize: 16, marginRight: 10 }}>📍</Text>
                                         <View style={{ flex: 1 }}>
-                                            <Text style={[styles.categoryOptionText, { color: colors.text }]}>
-                                                {sub}
-                                            </Text>
-                                            <Text style={[styles.categoryOptionSub, { color: colors.textSecondary }]}>
-                                                {selectedRegion} • Category
-                                            </Text>
+                                            <Text style={[styles.categoryOptionText, { color: colors.text }]}>{sub}</Text>
+                                            <Text style={[styles.categoryOptionSub, { color: colors.textSecondary }]}>{selectedRegion} • Category</Text>
                                         </View>
-                                        <View
-                                            style={[
-                                                styles.checkbox,
-                                                selectedCategories.includes(sub) && {
-                                                    backgroundColor: brand.PURPLE,
-                                                    borderColor: brand.PURPLE
-                                                }
-                                            ]}
-                                        >
-                                            {selectedCategories.includes(sub) && (
-                                                <Text style={{ color: '#FFF', fontSize: 12, fontWeight: '900' }}>✓</Text>
-                                            )}
+                                        <View style={[styles.checkbox, selectedCategories.includes(sub) && { backgroundColor: brand.PURPLE, borderColor: brand.PURPLE }]}>
+                                            {selectedCategories.includes(sub) && <Text style={{ color: '#FFF', fontSize: 12 }}>✓</Text>}
                                         </View>
                                     </TouchableOpacity>
                                 ))}
                             </ScrollView>
-
-                            {/* MODAL FOOTER WITH ACTION BUTTONS */}
                             <View style={[styles.modalFooter, { borderTopColor: colors.border }]}>
-                                <TouchableOpacity
-                                    onPress={() => setFilterVisible(false)}
-                                    style={[styles.modalBtn, { backgroundColor: colors.tabInactive, flex: 1 }]}
-                                >
+                                <TouchableOpacity onPress={() => setFilterVisible(false)} style={[styles.modalBtn, { backgroundColor: colors.tabInactive, flex: 1 }]}>
                                     <Text style={[styles.modalBtnText, { color: colors.text }]}>Cancel</Text>
                                 </TouchableOpacity>
-                                <TouchableOpacity
-                                    onPress={() => setFilterVisible(false)}
-                                    style={[styles.modalBtn, { backgroundColor: brand.BLUE, flex: 1, marginLeft: 12 }]}
-                                >
+                                <TouchableOpacity onPress={() => setFilterVisible(false)} style={[styles.modalBtn, { backgroundColor: brand.BLUE, flex: 1, marginLeft: 12 }]}>
                                     <Text style={[styles.modalBtnText, { color: '#FFF', fontWeight: '900' }]}>Apply</Text>
                                 </TouchableOpacity>
                             </View>
@@ -657,7 +740,7 @@ const HomeScreen = ({ isDarkMode }) => {
 
 const styles = StyleSheet.create({
     container: { flex: 1 },
-    
+
     // HEADER STYLES
     header: { paddingHorizontal: 20, paddingTop: 10, paddingBottom: 20, position: 'relative' },
     gradientBg: {
@@ -699,7 +782,7 @@ const styles = StyleSheet.create({
         height: 50,
         borderRadius: 16,
         borderWidth: 1,
-        marginBottom: 20,
+        marginBottom: 12,
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 2 },
         shadowOpacity: 0.05,
@@ -707,6 +790,28 @@ const styles = StyleSheet.create({
         elevation: 2
     },
     searchInput: { flex: 1, fontSize: 15, fontWeight: '600' },
+
+    searchStatusRow: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: 20,
+        paddingHorizontal: 4
+    },
+    searchTag: {
+        paddingHorizontal: 12,
+        paddingVertical: 6,
+        borderRadius: 10,
+    },
+    searchTagText: {
+        fontSize: 12,
+        fontWeight: '800'
+    },
+    searchCount: {
+        fontSize: 12,
+        fontWeight: '700',
+        opacity: 0.8
+    },
 
     regionSelectorContainer: { marginBottom: 20 },
     sectionLabel: { fontSize: 10, fontWeight: '900', letterSpacing: 1, marginBottom: 10 },
@@ -1004,6 +1109,75 @@ const styles = StyleSheet.create({
     },
     modalCancelText: { fontWeight: '800', fontSize: 15, letterSpacing: 0.5 },
 
+    // PAYWALL
+    paywallContainer: {
+        marginTop: -100, // Pull it up to overlap the end of the feed
+        paddingHorizontal: 16,
+        paddingBottom: 40,
+        zIndex: 10
+    },
+    paywallGradient: {
+        height: 150,
+        width: '100%',
+        zIndex: -1
+    },
+    paywallContent: {
+        borderRadius: 30,
+        padding: 24,
+        alignItems: 'center',
+        borderWidth: 1,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 10 },
+        shadowOpacity: 0.1,
+        shadowRadius: 20,
+        elevation: 5
+    },
+    paywallIcon: {
+        width: 80,
+        height: 80,
+        borderRadius: 40,
+        backgroundColor: 'rgba(45, 130, 255, 0.1)',
+        justifyContent: 'center',
+        alignItems: 'center',
+        marginBottom: 20
+    },
+    paywallTitle: {
+        fontSize: 24,
+        fontWeight: '900',
+        textAlign: 'center',
+        marginBottom: 12,
+        letterSpacing: -0.5
+    },
+    paywallDesc: {
+        fontSize: 15,
+        lineHeight: 22,
+        textAlign: 'center',
+        marginBottom: 24,
+        paddingHorizontal: 10
+    },
+    paywallBtn: {
+        width: '100%',
+        height: 56,
+        borderRadius: 16,
+        overflow: 'hidden',
+        marginBottom: 16
+    },
+    paywallBtnGradient: {
+        flex: 1,
+        justifyContent: 'center',
+        alignItems: 'center'
+    },
+    paywallBtnText: {
+        color: '#FFF',
+        fontSize: 16,
+        fontWeight: '900',
+        letterSpacing: 1
+    },
+    paywallHint: {
+        fontSize: 12,
+        fontWeight: '600',
+        opacity: 0.8
+    },
     // OTHER
     emptyContainer: { flex: 1, marginTop: 100, paddingHorizontal: 40, justifyContent: 'center', alignItems: 'center' },
     loadingOverlay: {

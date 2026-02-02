@@ -4,7 +4,8 @@
 const Constants = {
     // ⚠️ 'localhost' does not work on a physical phone.
     // We use your local IP so your phone can talk to your computer.
-    API_BASE_URL: 'https://web-production-18cf1.up.railway.app/',
+    // API_BASE_URL: 'https://web-production-18cf1.up.railway.app/',
+    API_BASE_URL: 'http://10.246.149.243:8000',
 
     BRAND: {
         BLUE: '#2D82FF',
