@@ -2574,18 +2574,19 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     success = await asyncio.to_thread(supabase_utils.store_telegram_link_token, token, user_id)
     
     if success:
-        # Create Deep Link Button
-        deep_link = f"hollowscan://link?code={token}"
+        # Use a redirect URL (Since Telegram buttons don't support hollowscan://)
+        api_base = os.getenv("API_BASE_URL", "http://localhost:8000")
+        redirect_url = f"{api_base}/v1/user/telegram/redirect?code={token}"
         
         keyboard = [
-            [InlineKeyboardButton("🔗 Connect Account", url=deep_link)]
+            [InlineKeyboardButton("🔗 Connect Account", url=redirect_url)]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
             "**🔗 Connect to hollowScan**\n\n"
             "Tap the button below to link your Telegram account to the mobile app.\n"
-            "This link expires in 10 minutes.",
+            "This will open a secure window to verify the connection.",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=reply_markup
         )
@@ -2631,7 +2632,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Premium tier for advanced features
 
 Use /settings to customize your alerts or /help for all commands.
-"""
 
 📊 <b>Status:</b>
 """

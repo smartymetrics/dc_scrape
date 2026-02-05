@@ -1,7 +1,8 @@
 import React, { createContext, useState, useEffect } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Notifications from 'expo-notifications';
 import Constants from '../Constants';
-import { registerForPushNotifications, setupNotificationHandler } from '../services/PushNotificationService';
+import { registerForPushNotifications, setupNotificationHandler, unregisterPushToken } from '../services/PushNotificationService';
 
 
 
@@ -144,21 +145,6 @@ export const UserProvider = ({ children }) => {
         }
     };
 
-    const resendVerification = async () => {
-        if (!user?.email) return { success: false, message: 'No email found' };
-        try {
-            const response = await fetch(`${Constants.API_BASE_URL}/v1/auth/resend-code`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email: user.email }),
-            });
-            const data = await response.json();
-            return { success: data.success, message: data.message };
-        } catch (error) {
-            console.error('[AUTH] Resend error:', error);
-            return { success: false, message: 'Connection error' };
-        }
-    };
 
     const verifyCode = async (code) => {
         if (!user?.email || !code) return { success: false, message: 'Email and code required' };
@@ -212,6 +198,22 @@ export const UserProvider = ({ children }) => {
         }
     };
 
+    const resendVerification = async () => {
+        if (!user?.email) return { success: false, message: 'No email found' };
+        try {
+            const response = await fetch(`${Constants.API_BASE_URL}/v1/auth/resend-code`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: user.email }),
+            });
+            const data = await response.json();
+            return { success: data.success || response.ok, message: data.message || data.detail || 'Code sent!' };
+        } catch (error) {
+            console.error('[AUTH] Resend verification error:', error);
+            return { success: false, message: 'Connection error' };
+        }
+    };
+
     const refreshUserStatus = async (passedUser = null) => {
         const targetUser = passedUser || user;
         if (!targetUser?.id) return;
@@ -249,8 +251,19 @@ export const UserProvider = ({ children }) => {
     };
 
     const logout = async () => {
-
         try {
+            // Unregister push token from backend before logging out
+            if (user?.id) {
+                try {
+                    const tokenData = await Notifications.getExpoPushTokenAsync();
+                    if (tokenData && tokenData.data) {
+                        await unregisterPushToken(user.id, tokenData.data);
+                    }
+                } catch (pushError) {
+                    console.log('[AUTH] Error unregistering push token:', pushError);
+                }
+            }
+
             setUser(null);
             await AsyncStorage.removeItem('user_data');
         } catch (error) {

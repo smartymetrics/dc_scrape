@@ -6,6 +6,7 @@ Performance optimized for mobile with connection pooling and async operations.
 """
 
 from fastapi import FastAPI, HTTPException, Depends, Query, Header, Body, BackgroundTasks
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import asyncio
@@ -412,6 +413,32 @@ async def register_push_token(user_id: str = Query(...), token: str = Query(...)
             
     return {"success": True}
 
+@app.delete("/v1/user/push-token")
+async def unregister_push_token(user_id: str = Query(...), token: str = Query(...)):
+    """Unregister a push token for a user (on logout)"""
+    if not user_id or not token: raise HTTPException(status_code=400, detail="User ID and token are required")
+    
+    # 1. Update local cache
+    if user_id in USER_PUSH_TOKENS and token in USER_PUSH_TOKENS[user_id]:
+        USER_PUSH_TOKENS[user_id].remove(token)
+        try:
+            with open("data/push_tokens.json", "w") as f:
+                json.dump(USER_PUSH_TOKENS, f)
+        except: pass
+        print(f"[PUSH] Unregistered token for user {user_id} in local cache")
+
+    # 2. Update Supabase
+    user = await get_user_by_id(user_id)
+    if user:
+        current_tokens = user.get("push_tokens") or []
+        if not isinstance(current_tokens, list): current_tokens = []
+        if token in current_tokens:
+            current_tokens.remove(token)
+            await update_user(user_id, {"push_tokens": current_tokens})
+            print(f"[PUSH] Unregistered token for user {user_id} in DB")
+            
+    return {"success": True}
+
 @app.post("/v1/user/preferences")
 async def update_preferences(user_id: str = Query(...), data: Dict = Body(...)):
     """Sync notification preferences to DB"""
@@ -610,6 +637,41 @@ async def link_telegram_endpoint(data: Dict = Body(...)):
         print(f"[LINK] Error linking: {e}")
         return {"success": False, "message": str(e)}
 
+@app.get("/v1/user/telegram/redirect", response_class=HTMLResponse)
+async def telegram_redirect_page(code: str = Query(...)):
+    """A helper page to redirect from Telegram to the Mobile App"""
+    # This page solves the 'unsupported protocol' error in Telegram buttons
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Connecting to hollowScan...</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body {{ font-family: -apple-system, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; background: #0A0A0B; color: white; text-align: center; padding: 20px; }}
+            .loader {{ border: 4px solid #1C1C1E; border-top: 4px solid #4F46E5; border-radius: 50%; width: 40px; height: 40px; animation: spin 2s linear infinite; margin-bottom: 20px; }}
+            @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
+            .btn {{ display: inline-block; padding: 12px 24px; background: #4F46E5; color: white; text-decoration: none; border-radius: 8px; font-weight: bold; margin-top: 20px; text-transform: uppercase; letter-spacing: 1px; }}
+        </style>
+    </head>
+    <body>
+        <div class="loader"></div>
+        <h2 style="margin: 0;">Linking your account...</h2>
+        <p style="color: #9CA3AF; margin-top: 8px;">If you are not redirected automatically, tap the button below.</p>
+        <a href="hollowscan://link?code={code}" class="btn">Open hollowScan</a>
+        <script>
+            // Attempt automatic redirect
+            window.location.href = "hollowscan://link?code={code}";
+            // Fallback for some browsers: if they stay on page for 3 seconds
+            setTimeout(function() {{
+                window.location.href = "hollowscan://link?code={code}";
+            }}, 2000);
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
 @app.post("/v1/user/telegram/unlink")
 async def unlink_telegram_endpoint(data: Dict = Body(...)):
     user_id = data.get("user_id")
@@ -702,7 +764,13 @@ async def background_notification_worker():
                         except: pass
                         
                         final_title = f"{prefix}: {title}"
-                        body = f"New drop in {msg_region}! Tap to grab this deal before it sells out."
+                        
+                        # Enhanced informative body
+                        price_info = f"Price: ${raw_now}" if raw_now else "Check Price"
+                        if raw_was and raw_was != raw_now:
+                            price_info += f" (Market: ${raw_was})"
+                            
+                        body = f"{product_data.get('title', 'View Deal')} | {price_info} | {msg_region}"
                         
                         # Target specific users based on preferences
                         target_tokens = []
@@ -731,7 +799,7 @@ async def background_notification_worker():
                             print(f"[PUSH] Sending to {len(set(target_tokens))} devices...")
                             await send_expo_push_notification(list(set(target_tokens)), final_title, body, {"product_id": msg["id"]})
                     
-                    LAST_PUSH_CHECK_TIME = now
+                    LAST_PUSH_CHECK_TIME = datetime.now(timezone.utc)
         except Exception as e:
             print(f"[PUSH] Worker error: {e}")
 

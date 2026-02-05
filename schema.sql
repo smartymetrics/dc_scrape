@@ -57,8 +57,16 @@ CREATE TABLE IF NOT EXISTS saved_deals (
 
 -- 4. TELEGRAM_LINK_TOKENS TABLE (Temporary)
 CREATE TABLE IF NOT EXISTS telegram_link_tokens (
-    token VARCHAR(6) PRIMARY KEY,
-    email VARCHAR(255) NOT NULL,
+    token TEXT PRIMARY KEY,
+    telegram_id TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 4.1 EMAIL_VERIFICATIONS TABLE
+CREATE TABLE IF NOT EXISTS email_verifications (
+    email TEXT PRIMARY KEY,
+    code VARCHAR(6) NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );

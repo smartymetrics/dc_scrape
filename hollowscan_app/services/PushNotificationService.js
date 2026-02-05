@@ -40,6 +40,8 @@ export const setupNotificationHandler = () => {
     Notifications.setNotificationHandler({
         handleNotification: async () => ({
             shouldShowAlert: true,
+            shouldShowBanner: true,
+            shouldShowList: true,
             shouldPlaySound: true,
             shouldSetBadge: true,
         }),
@@ -94,10 +96,10 @@ export const sendLocalNotification = async (title, body, data = {}) => {
 export const sendDealNotification = async (product) => {
     try {
         const { product_data, category_name, country_code } = product;
-        const title = `🎉 New ${category_name?.toUpperCase() || 'Deal'} in ${country_code}`;
+        const title = `🎉 ${product_data?.title?.substring(0, 45)}${product_data?.title?.length > 45 ? '...' : ''}`;
         const price = product_data?.price || 'N/A';
         const resell = product_data?.resell || 'N/A';
-        const body = `${product_data?.title?.substring(0, 40) || 'New Product'}... | Buy: $${price} | Sell: $${resell}`;
+        const body = `Price: $${price} | Market: $${resell} | Store: ${country_code} | Cat: ${category_name}`;
 
         await sendLocalNotification(title, body, {
             product_id: product_data?.id || 'unknown',
@@ -141,6 +143,20 @@ export const savePushTokenToBackend = async (userId, token) => {
         return data.success;
     } catch (error) {
         console.log('[NOTIFICATIONS] Error saving token to backend:', error);
+        return false;
+    }
+};
+
+export const unregisterPushToken = async (userId, token) => {
+    try {
+        const response = await fetch(`${Constants.API_BASE_URL}/v1/user/push-token?user_id=${userId}&token=${token}`, {
+            method: 'DELETE',
+        });
+        const data = await response.json();
+        console.log('[NOTIFICATIONS] Unregister token response:', data);
+        return data.success;
+    } catch (error) {
+        console.log('[NOTIFICATIONS] Error unregistering token from backend:', error);
         return false;
     }
 };

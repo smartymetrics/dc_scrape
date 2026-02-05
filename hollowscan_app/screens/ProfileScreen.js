@@ -213,13 +213,6 @@ const ProfileScreen = ({ navigation }) => {
                     </TouchableOpacity>
                 </ImageBackground>
 
-                {/* STATS ROW */}
-                <View style={styles.statsRow}>
-                    <StatBox label="Saved" value={savedCount} />
-                    <StatBox label="Profit" value={`$${potentialProfit}`} />
-                    <StatBox label="Alerts" value="3" />
-                </View>
-
                 {/* NOTIFICATION & PREFERENCES */}
                 <SectionHeader title="SETTINGS" />
                 <View style={[styles.group, { backgroundColor: colors.groupBg, borderColor: colors.border }]}>
