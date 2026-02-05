@@ -6,6 +6,7 @@ import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SavedContext } from '../context/SavedContext';
 import { UserContext } from '../context/UserContext';
+import { formatPriceDisplay } from '../utils/format';
 import Constants from '../Constants';
 
 const { width } = Dimensions.get('window');
@@ -201,32 +202,6 @@ const ProductDetailScreen = ({ route, navigation }) => {
     };
 
     // --- HELPERS ---
-    const formatPriceDisplay = (value, region) => {
-        if (!value || isNaN(value) || value === 0) {
-            const symbol = region?.includes('UK') ? '£' : region?.includes('Canada') ? 'CAD ' : '$';
-            return `${symbol}0.00`;
-        }
-
-        const num = parseFloat(value);
-
-        if (region?.includes('Canada')) {
-            const usd = (num * 0.73).toFixed(0);
-            return `CAD ${num.toFixed(2)} (USD ${usd})`;
-        }
-
-        const formatted = new Intl.NumberFormat('en-US', {
-            style: 'currency',
-            currency: region?.includes('UK') ? 'GBP' : 'USD',
-            minimumFractionDigits: 2
-        }).format(num);
-
-        if (region?.includes('UK')) {
-            const usd = (num * 1.25).toFixed(0);
-            return `${formatted} (USD ${usd})`;
-        }
-
-        return formatted;
-    };
 
     // Helper to render price with strikethrough
     const renderPriceValue = (value) => {
@@ -328,23 +303,25 @@ const ProductDetailScreen = ({ route, navigation }) => {
                             </View>
 
                             {/* Savings Display */}
-                            <View style={styles.heroSavingsRow}>
-                                <Text style={styles.heroSavingsLabel}>🎉 You Save</Text>
-                                <Text style={styles.heroSavingsAmount}>
-                                    {formatPriceDisplay(wasPrice - buyPrice, product.region)}
-                                </Text>
-                            </View>
+                            {(wasPrice - buyPrice) > 0 && formatPriceDisplay(wasPrice - buyPrice, product.region) && (
+                                <View style={styles.heroSavingsRow}>
+                                    <Text style={styles.heroSavingsLabel}>🎉 You Save</Text>
+                                    <Text style={styles.heroSavingsAmount}>
+                                        {formatPriceDisplay(wasPrice - buyPrice, product.region)}
+                                    </Text>
+                                </View>
+                            )}
 
                             {/* Price Comparison */}
                             <View style={styles.heroPriceRow}>
                                 <View style={{ flex: 1 }}>
                                     <Text style={styles.heroNowLabel}>Now</Text>
-                                    <Text style={styles.heroNowPrice}>{formatPriceDisplay(buyPrice, product.region)}</Text>
+                                    <Text style={styles.heroNowPrice}>{formatPriceDisplay(buyPrice, product.region) || 'Check Price'}</Text>
                                 </View>
                                 <View style={styles.heroPriceDivider} />
                                 <View style={{ flex: 1, alignItems: 'flex-end' }}>
                                     <Text style={styles.heroWasLabel}>Was</Text>
-                                    <Text style={styles.heroWasPrice}>{formatPriceDisplay(wasPrice, product.region)}</Text>
+                                    <Text style={styles.heroWasPrice}>{formatPriceDisplay(wasPrice, product.region) || '—'}</Text>
                                 </View>
                             </View>
                         </LinearGradient>
@@ -383,14 +360,14 @@ const ProductDetailScreen = ({ route, navigation }) => {
                             <View style={styles.profitStatItem}>
                                 <Text style={[styles.profitStatLabel, { color: colors.textSecondary }]}>Cost Price</Text>
                                 <Text style={[styles.profitStatValue, { color: colors.text }]}>
-                                    {formatPriceDisplay(buyPrice > 0 ? buyPrice : 0, product.region)}
+                                    {formatPriceDisplay(buyPrice, product.region) || 'Check Price'}
                                 </Text>
                             </View>
                             <View style={[styles.profitStatDivider, { backgroundColor: colors.divider }]} />
                             <View style={styles.profitStatItem}>
                                 <Text style={[styles.profitStatLabel, { color: colors.textSecondary }]}>Market Value</Text>
                                 <Text style={[styles.profitStatValue, { color: '#10B981' }]}>
-                                    {formatPriceDisplay(sellPrice, product.region)}
+                                    {formatPriceDisplay(sellPrice, product.region) || 'Check Price'}
                                 </Text>
                             </View>
                         </View>

@@ -26,6 +26,7 @@ import { SavedContext } from '../context/SavedContext';
 import { UserContext } from '../context/UserContext';
 import LiveProductService from '../services/LiveProductService';
 import { setupNotificationHandler, sendDealNotification } from '../services/PushNotificationService';
+import { formatPriceDisplay } from '../utils/format';
 
 const { width } = Dimensions.get('window');
 
@@ -295,32 +296,7 @@ const HomeScreen = () => {
     };
 
     // --- HELPERS ---
-    const formatPriceDisplay = (value, region) => {
-        if (!value || isNaN(value) || value === 0) {
-            const symbol = region === 'UK Stores' ? '£' : region === 'Canada Stores' ? 'CAD ' : '$';
-            return `${symbol}0.00`;
-        }
 
-        const num = parseFloat(value);
-
-        if (region === 'Canada Stores') {
-            const usd = (num * 0.73).toFixed(0);
-            return `CAD ${num.toFixed(2)} (USD ${usd})`;
-        }
-
-        const formatted = new Intl.NumberFormat('en-US', {
-            style: 'currency',
-            currency: region === 'UK Stores' ? 'GBP' : 'USD',
-            minimumFractionDigits: 2
-        }).format(num);
-
-        if (region === 'UK Stores') {
-            const usd = (num * 1.25).toFixed(0);
-            return `${formatted} (USD ${usd})`;
-        }
-
-        return formatted;
-    };
 
     const parsePriceData = (data, region) => {
         let price = 0;
@@ -487,11 +463,13 @@ const HomeScreen = () => {
                                             </Text>
                                         </View>
                                         {/* YOU SAVE BADGE */}
-                                        <View style={[styles.savingsBadge, { backgroundColor: '#FBBF2415' }]}>
-                                            <Text style={[styles.savingsText, { color: '#D97706' }]}>
-                                                Save {formatPriceDisplay(wasPriceVal - priceVal, item.region)}
-                                            </Text>
-                                        </View>
+                                        {(wasPriceVal - priceVal) > 0 && formatPriceDisplay(wasPriceVal - priceVal, item.region) && (
+                                            <View style={[styles.savingsBadge, { backgroundColor: '#FBBF2415' }]}>
+                                                <Text style={[styles.savingsText, { color: '#D97706' }]}>
+                                                    Save {formatPriceDisplay(wasPriceVal - priceVal, item.region)}
+                                                </Text>
+                                            </View>
+                                        )}
                                     </View>
                                 </View>
                             ) : (
@@ -503,7 +481,7 @@ const HomeScreen = () => {
                                         </Text>
                                     </View>
 
-                                    {hasResell && (
+                                    {hasResell && displayResale && (
                                         <View style={styles.priceRight}>
                                             <Text style={[styles.resalePrice, { color: '#10B981', textAlign: 'right' }]}>
                                                 Market: {displayResale}

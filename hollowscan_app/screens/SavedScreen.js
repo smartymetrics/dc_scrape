@@ -4,6 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { SavedContext } from '../context/SavedContext';
 import { UserContext } from '../context/UserContext';
 import Constants from '../Constants';
+import { formatPriceDisplay } from '../utils/format';
 
 const SavedScreen = ({ navigation }) => {
     const { savedProducts } = useContext(SavedContext);
@@ -38,8 +39,9 @@ const SavedScreen = ({ navigation }) => {
     };
 
     const renderItem = ({ item }) => {
-
         const data = item.product_data || {};
+        const displayPrice = formatPriceDisplay(data.price, item.region);
+
         return (
             <TouchableOpacity
                 style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}
@@ -50,7 +52,7 @@ const SavedScreen = ({ navigation }) => {
                 <View style={styles.cardContent}>
                     <Text style={[styles.title, { color: colors.text }]} numberOfLines={2}>{data.title}</Text>
                     <View style={styles.priceRow}>
-                        <Text style={[styles.price, { color: colors.text }]}>${data.price}</Text>
+                        <Text style={[styles.price, { color: colors.text }]}>{displayPrice || 'Check Price'}</Text>
                         {data.roi && <Text style={styles.roi}>+{data.roi}% ROI</Text>}
                     </View>
                 </View>

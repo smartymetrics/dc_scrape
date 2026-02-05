@@ -178,9 +178,9 @@ async def send_email_via_resend(to_email: str, subject: str, html_content: str):
         "Authorization": f"Bearer {RESEND_API_KEY}",
         "Content-Type": "application/json"
     }
-    # For Resend free accounts without a domain, only onboarding@resend.dev works
+    # Professional sender address using verified domain
     payload = {
-        "from": "hollowScan <onboarding@resend.dev>",
+        "from": "hollowScan <no-reply@hollowscan.com>",
         "to": [to_email],
         "subject": subject,
         "html": html_content
@@ -234,31 +234,55 @@ async def delete_verification_code_from_supabase(email: str) -> bool:
         print(f"[DB] Error deleting verification code: {e}")
     return False
 
-async def trigger_email_verification(email: str):
-    code = generate_verification_code()
-    expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
-    
-    success = await upsert_verification_code_to_supabase(email, code, expires_at)
-    if not success:
-        print(f"[AUTH] Failed to save verification code for {email} to Supabase")
-        return False
-    
-    html = f"""
-    <div style="font-family: sans-serif; padding: 20px; color: #333; max-width: 500px; margin: auto; border: 1px solid #eee; border-radius: 12px;">
-        <h2 style="color: #007AFF; text-align: center;">Verify Your Email</h2>
-        <p>Welcome to <b>hollowScan</b>! Use the code below to verify your email address and unlock all features:</p>
-        <div style="background: #F2F2F7; padding: 20px; border-radius: 12px; font-size: 32px; font-weight: 800; text-align: center; letter-spacing: 10px; color: #1C1C1E; margin: 20px 0;">
-            {code}
-        </div>
-        <p style="font-size: 14px; color: #8E8E93; text-align: center;">This code will expire in 24 hours.</p>
-        <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
-        <p style="font-size: 12px; color: #AEAEB2; text-align: center;">If you didn't create an account, you can safely ignore this email.</p>
-    </div>
+async def trigger_email_verification(email: str, force: bool = False):
     """
-    return await send_email_via_resend(email, f"{code} is your hollowScan verification code", html)
+    Triggers a verification email with cooldown logic.
+    force=True bypasses the cooldown (used for manual resends with their own check).
+    """
+    try:
+        # 1. Cooldown Check (60 seconds)
+        if not force:
+            stored = await get_verification_code_from_supabase(email)
+            if stored:
+                last_sent = safe_parse_dt(stored.get("created_at"))
+                if last_sent:
+                    elapsed = (datetime.now(timezone.utc) - last_sent).total_seconds()
+                    if elapsed < 60:
+                        print(f"[AUTH] Cooldown skip for {email} ({int(elapsed)}s elapsed)")
+                        return False
+
+        # 2. Generate and Save Code
+        code = generate_verification_code()
+        expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+        
+        success = await upsert_verification_code_to_supabase(email, code, expires_at)
+        if not success:
+            print(f"[AUTH] Failed to save verification code for {email}")
+            return False
+        
+        # 3. Send Email
+        html = f"""
+        <div style="font-family: sans-serif; padding: 20px; color: #333; max-width: 500px; margin: auto; border: 1px solid #eee; border-radius: 12px;">
+            <h2 style="color: #007AFF; text-align: center;">Verify Your Email</h2>
+            <p>Welcome to <b>hollowScan</b>! Use the code below to verify your email address and unlock all features:</p>
+            <div style="background: #F2F2F7; padding: 20px; border-radius: 12px; font-size: 32px; font-weight: 800; text-align: center; letter-spacing: 10px; color: #1C1C1E; margin: 20px 0;">
+                {code}
+            </div>
+            <p style="font-size: 14px; color: #8E8E93; text-align: center;">This code will expire in 24 hours.</p>
+            <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+            <p style="font-size: 12px; color: #AEAEB2; text-align: center;">If you didn't create an account, you can safely ignore this email.</p>
+        </div>
+        """
+        sent = await send_email_via_resend(email, f"{code} is your hollowScan verification code", html)
+        if sent:
+            print(f"[AUTH] Verification email sent to {email}")
+        return sent
+    except Exception as e:
+        print(f"[AUTH] Error in trigger_email_verification: {e}")
+        return False
 
 @app.post("/v1/auth/signup")
-async def signup(data: Dict = Body(...)):
+async def signup(background_tasks: BackgroundTasks, data: Dict = Body(...)):
     email = data.get("email")
     password = data.get("password")
     if not email or not password: raise HTTPException(status_code=400, detail="Email and password are required")
@@ -270,8 +294,8 @@ async def signup(data: Dict = Body(...)):
         response = await http_client.post(f"{URL}/rest/v1/users", headers=HEADERS, json=payload)
         if response.status_code in [200, 201]:
             user = response.json()[0] if isinstance(response.json(), list) else response.json()
-            # Trigger verification email
-            await trigger_email_verification(email)
+            # Trigger verification email in background
+            background_tasks.add_task(trigger_email_verification, email)
             return {"success": True, "user": {"id": user["id"], "email": user["email"], "isPremium": user.get("subscription_status") == "active", "email_verified": False}}
 
         else: raise HTTPException(status_code=500, detail="Failed to create user")
@@ -281,21 +305,22 @@ async def signup(data: Dict = Body(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/v1/auth/resend-code")
-async def resend_code(data: Dict = Body(...)):
+async def resend_code(background_tasks: BackgroundTasks, data: Dict = Body(...)):
     email = data.get("email")
     if not email: raise HTTPException(status_code=400, detail="Email is required")
     
-    # Cooldown check (60 seconds)
+    # Check cooldown explicitly here to provide user feedback
     stored = await get_verification_code_from_supabase(email)
     if stored:
-        last_sent = datetime.fromisoformat(stored["created_at"].replace('Z', '+00:00'))
-        elapsed = (datetime.now(timezone.utc) - last_sent).total_seconds()
-        if elapsed < 60:
-            remaining = int(60 - elapsed)
-            raise HTTPException(status_code=429, detail=f"Please wait {remaining} seconds before resending.")
+        last_sent = safe_parse_dt(stored.get("created_at"))
+        if last_sent:
+            elapsed = (datetime.now(timezone.utc) - last_sent).total_seconds()
+            if elapsed < 60:
+                remaining = int(60 - elapsed)
+                raise HTTPException(status_code=429, detail=f"Please wait {remaining} seconds before resending.")
             
-    success = await trigger_email_verification(email)
-    if not success: raise HTTPException(status_code=500, detail="Failed to send verification email")
+    # Trigger verification email in background (force=True since we did the check above)
+    background_tasks.add_task(trigger_email_verification, email, force=True)
     return {"success": True, "message": "Verification code sent! Please check your inbox."}
 
 @app.post("/v1/auth/verify-code")
@@ -834,7 +859,7 @@ async def background_notification_worker():
 
 
 @app.post("/v1/auth/login")
-async def login(data: Dict = Body(...)):
+async def login(background_tasks: BackgroundTasks, data: Dict = Body(...)):
     email = data.get("email")
     password = data.get("password")
     if not email or not password: raise HTTPException(status_code=400, detail="Email and password are required")
@@ -843,6 +868,12 @@ async def login(data: Dict = Body(...)):
     stored_hash = user.get("password_hash")
     if not stored_hash or stored_hash != hash_password(password): raise HTTPException(status_code=401, detail="Invalid email or password")
     
+    # AUTO-TRIGGER verification if not verified
+    is_verified = user.get("email_verified", False)
+    if not is_verified:
+        print(f"[AUTH] Unverified login for {email}, triggering background code")
+        background_tasks.add_task(trigger_email_verification, email)
+
     return {
         "success": True, 
         "user": {
@@ -850,7 +881,7 @@ async def login(data: Dict = Body(...)):
             "email": user["email"], 
             "isPremium": user.get("subscription_status") == "active", 
             "subscriptionEnd": user.get("subscription_end"),
-            "email_verified": user.get("email_verified", False)
+            "email_verified": is_verified
         }
     }
 
