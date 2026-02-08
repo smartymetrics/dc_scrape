@@ -1034,24 +1034,46 @@ async def background_notification_worker():
                             
                             # Process notification (wrapped in try-catch)
                             try:
-                                # Notification logic here - keeping it simple
-                                msg_region = msg.get("region", "USA Stores")
-                                msg_category = msg.get("category_name", "General")
+                                # --- Professional Formatting Logic ---
                                 product_data = msg.get("product_data", {})
-                                title = str(product_data.get("title") or "Deal Alert")[:60]
+                                title_raw = str(product_data.get("title") or "Deal Alert")
+                                price = product_data.get("price")
+                                was_price = product_data.get("was_price") or product_data.get("resell")
                                 
-                                # Filter users
-                                target_tokens = []
-                                for u in users_data:
-                                    prefs = u.get("notification_preferences") or {}
-                                    if not prefs.get("enabled", True):
-                                        continue
-                                    tokens = u.get("push_tokens") or []
-                                    if isinstance(tokens, list):
-                                        target_tokens.extend(tokens)
+                                # 1. Build Title with Discount Info
+                                discount_prefix = "🎉 "
+                                try:
+                                    if price and was_price:
+                                        p_val = float(str(price).replace('$', '').replace(',', '').strip())
+                                        w_val = float(str(was_price).replace('$', '').replace(',', '').strip())
+                                        if w_val > p_val and p_val > 0:
+                                            disc = int(((w_val - p_val) / w_val) * 100)
+                                            if disc >= 10:
+                                                discount_prefix = f"📉 {disc}% OFF: "
+                                except: pass
+                                
+                                final_title = f"{discount_prefix}{title_raw[:45]}..." if len(title_raw) > 45 else f"{discount_prefix}{title_raw}"
+                                
+                                # 2. Build Body with Store & Prices
+                                body_parts = []
+                                if price and str(price) not in ["0.0", "N/A", "0"]:
+                                    body_parts.append(f"Now: ${price}")
+                                if was_price and str(was_price) not in ["0.0", "N/A", "0"] and was_price != price:
+                                    body_parts.append(f"Was: ${was_price}")
+                                
+                                store_label = msg.get("category_name", "HollowScan")
+                                region_label = msg.get("region", "").replace(" Stores", "")
+                                body_parts.append(f"{region_label} {store_label}".strip())
+                                
+                                final_body = " | ".join(body_parts)
                                 
                                 if target_tokens:
-                                    await send_expo_push_notification(list(set(target_tokens)), title, msg_region, {"product_id": str(msg["id"])})
+                                    await send_expo_push_notification(
+                                        list(set(target_tokens)), 
+                                        final_title, 
+                                        final_body, 
+                                        {"product_id": str(msg["id"])}
+                                    )
                             except Exception as msg_err:
                                 print(f"[PUSH] Error processing message: {msg_err}")
                         

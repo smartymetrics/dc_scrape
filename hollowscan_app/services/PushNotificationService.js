@@ -35,6 +35,9 @@ export const requestNotificationPermissions = async () => {
                 importance: Notifications.AndroidImportance.MAX,
                 vibrationPattern: [0, 250, 250, 250],
                 lightColor: '#FF231F7C',
+                sound: 'default',
+                enableVibrate: true,
+                showBadge: true,
             });
         }
 
@@ -50,8 +53,7 @@ export const setupNotificationHandler = () => {
     // Set how notifications should appear when app is in foreground
     Notifications.setNotificationHandler({
         handleNotification: async () => ({
-            shouldShowBanner: true,
-            shouldShowList: true,
+            shouldShowAlert: true,
             shouldPlaySound: true,
             shouldSetBadge: true,
         }),

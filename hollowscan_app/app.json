@@ -12,9 +12,19 @@
       "resizeMode": "contain",
       "backgroundColor": "#0A0A0B"
     },
+    "notification": {
+      "icon": "./assets/icon.png",
+      "color": "#0A0A0B",
+      "iosDisplayInForeground": true
+    },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.kttylabs.app"
+      "bundleIdentifier": "com.kttylabs.app",
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "remote-notification"
+        ]
+      }
     },
     "android": {
       "adaptiveIcon": {
