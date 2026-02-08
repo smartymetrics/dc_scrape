@@ -640,9 +640,40 @@ async def send_expo_push_notification(tokens: List[str], title: str, body: str, 
                 push_resp = resp_data.get("data", {})
                 if isinstance(push_resp, dict): # Single token response
                     if push_resp.get("status") == "error":
-                        error_code = push_resp.get("details", {}).get("error")
-                        print(f"[PUSH] Token Error ({error_code}): {token[:20]}...")
-                        # If DeviceNotRegistered, we should ideally remove it, but for now we just log it.
+                        details = push_resp.get("details", {})
+                        error_code = details.get("error")
+                        
+                        if error_code == "DeviceNotRegistered":
+                            print(f"[PUSH] Stale Token Detected: {token[:20]}... Cleaning up from DB.")
+                            # Automated Cleanup: Find any user who has this token and remove it
+                            try:
+                                # We search users WHERE push_tokens contains the token
+                                # Supabase 'cs' (contains) operator for JSONB arrays
+                                search_response = await http_client.get(
+                                    f"{URL}/rest/v1/users?push_tokens=cs.%5B%22{token}%22%5D&select=id,push_tokens",
+                                    headers=HEADERS
+                                )
+                                
+                                if search_response.status_code == 200:
+                                    affected_users = search_response.json()
+                                    for user in affected_users:
+                                        uid = user.get("id")
+                                        utokens = user.get("push_tokens") or []
+                                        if token in utokens:
+                                            utokens.remove(token)
+                                            await http_client.patch(
+                                                f"{URL}/rest/v1/users?id=eq.{uid}",
+                                                headers=HEADERS,
+                                                json={"push_tokens": utokens}
+                                            )
+                                            print(f"[PUSH] Automatically removed stale token from user {uid}")
+                            except Exception as cleanup_err:
+                                print(f"[PUSH] Error during auto-cleanup: {cleanup_err}")
+                                
+                        elif error_code == "InvalidCredentials":
+                            print(f"[PUSH] ALERT: InvalidCredentials for token {token[:20]}... (Check FCM V1 Config or Experience ID mismatch)")
+                        else:
+                            print(f"[PUSH] Token Error ({error_code}): {token[:20]}...")
 
         except Exception as e:
             print(f"[PUSH] Error sending to token {token[:15]}...: {e}")
@@ -1036,6 +1067,17 @@ async def background_notification_worker():
                             try:
                                 # --- Professional Formatting Logic ---
                                 product_data = msg.get("product_data", {})
+                                
+                                # Filter users to get tokens
+                                target_tokens = []
+                                for u in users_data:
+                                    prefs = u.get("notification_preferences") or {}
+                                    if not prefs.get("enabled", True):
+                                        continue
+                                    tokens = u.get("push_tokens") or []
+                                    if isinstance(tokens, list):
+                                        target_tokens.extend(tokens)
+
                                 title_raw = str(product_data.get("title") or "Deal Alert")
                                 price = product_data.get("price")
                                 was_price = product_data.get("was_price") or product_data.get("resell")
