@@ -802,6 +802,15 @@ class SubscriptionManager:
             if str(user_id) in self.potential_users:
                 self.potential_users.pop(str(user_id))
             self._sync_state()
+
+            # Sync to Supabase SQL (2-way sync with Mobile App)
+            try:
+                if hasattr(supabase_utils, 'sync_telegram_premium_to_app'):
+                    supabase_utils.sync_telegram_premium_to_app(str(user_id), new_expiry.isoformat())
+                    logger.info(f"🔄 Synced premium for {user_id} to Supabase SQL")
+            except Exception as se:
+                logger.warning(f"⚠️ Failed to sync premium to Supabase: {se}")
+
             return True
 
     def process_stripe_event(self, event):
@@ -861,6 +870,14 @@ class SubscriptionManager:
                         self.potential_users.pop(uid)
                     
                     self._sync_state()
+                    
+                    # Sync to Supabase SQL (2-way sync with Mobile App)
+                    try:
+                        if hasattr(supabase_utils, 'sync_telegram_premium_to_app'):
+                           supabase_utils.sync_telegram_premium_to_app(uid, new_expiry.isoformat())
+                    except Exception as se:
+                        logger.warning(f"⚠️ Failed to sync Stripe premium to Supabase: {se}")
+
                     logger.info(f"💰 Stripe: User {uid} subscribed via Checkout.")
                     
                     # Notify user immediately
@@ -899,6 +916,14 @@ Your payment was successful and your subscription is now <b>Active</b> for the n
                             new_expiry = datetime.utcnow() + timedelta(days=days_to_add)
                             self.users[uid]["expiry"] = new_expiry.isoformat()
                             self._sync_state()
+                            
+                            # Sync to Supabase SQL (2-way sync with Mobile App)
+                            try:
+                                if hasattr(supabase_utils, 'sync_telegram_premium_to_app'):
+                                    supabase_utils.sync_telegram_premium_to_app(uid, new_expiry.isoformat())
+                            except Exception as se:
+                                logger.warning(f"⚠️ Failed to sync renewal to Supabase: {se}")
+
                             logger.info(f"✅ Stripe: User {uid} subscription renewed ({days_to_add} days).")
                             
                             # Notify user of renewal
@@ -920,6 +945,14 @@ Your payment was successful and your subscription is now <b>Active</b> for the n
                             # Stripe usually sends this when it FINALLY ends.
                             self.users[uid]["expiry"] = datetime.utcnow().isoformat()
                             self._sync_state()
+                            
+                            # Sync to Supabase SQL (2-way sync with Mobile App)
+                            try:
+                                if hasattr(supabase_utils, 'sync_telegram_premium_to_app'):
+                                    supabase_utils.sync_telegram_premium_to_app(uid, datetime.utcnow().isoformat())
+                            except Exception as se:
+                                logger.warning(f"⚠️ Failed to sync termination to Supabase: {se}")
+
                             logger.info(f"❌ Stripe: User {uid} subscription terminated.")
                             break
 
@@ -1109,6 +1142,24 @@ Your payment was successful and your subscription is now <b>Active</b> for the n
             if uid in self.potential_users:
                 self.potential_users[uid]["last_reminder"] = datetime.utcnow().isoformat()
                 self._sync_state()
+
+    def revoke_premium(self, user_id: str) -> bool:
+        """Immediately revoke premium status (used for unlinking)"""
+        with self.lock:
+            uid = str(user_id)
+            if uid in self.users:
+                # Set expiry to now or past to deactivate
+                self.users[uid]["expiry"] = datetime.utcnow().isoformat()
+                # Clear stripe/payment identifiers to prevent auto-renewal logic from finding them
+                if "stripe_customer_id" in self.users[uid]:
+                    del self.users[uid]["stripe_customer_id"]
+                if "stripe_subscription_id" in self.users[uid]:
+                    del self.users[uid]["stripe_subscription_id"]
+                
+                self._sync_state()
+                logger.info(f"🛑 Premium REVOKED for {uid} due to unlinking")
+                return True
+            return False
 
 
 # --- MESSAGE POLLER ---
@@ -2721,11 +2772,19 @@ async def handle_unlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /unlink command"""
     user_id = str(update.effective_user.id)
     
-    # Delete link from Supabase
+    # 1. Delete link from Supabase SQL (App side)
     success = await asyncio.to_thread(supabase_utils.delete_user_telegram_link, user_id)
     
     if success:
-        await update.message.reply_text("✅ Your Telegram account has been unlinked from hollowScan.")
+        # 2. Revoke Premium from Telegram Bot locally
+        sm.revoke_premium(user_id)
+        
+        await update.message.reply_text(
+            "✅ <b>Successfully Unlinked!</b>\n\n"
+            "Your Telegram account has been disconnected from the HollowScan app.\n"
+            "Premium access (if synced from the app) has been removed.",
+            parse_mode=ParseMode.HTML
+        )
     else:
         await update.message.reply_text("❌ Failed to unlink or account was not linked.")
 
